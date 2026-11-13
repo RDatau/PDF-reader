@@ -135,6 +135,18 @@
             writable: true, configurable: true, enumerable: false
           });
         }
+        if (typeof URL !== "undefined" && typeof URL.parse !== "function") {
+          Object.defineProperty(URL, "parse", {
+            value: function(url, base) {
+              try {
+                return arguments.length > 1 && base !== undefined ? new URL(url, base) : new URL(url);
+              } catch (e) {
+                return null;
+              }
+            },
+            writable: true, configurable: true, enumerable: false
+          });
+        }
       })();
     </script>
   </head>

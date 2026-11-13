@@ -4,6 +4,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import { AppearanceSettings, TtsFilterSettings } from "../types";
 import { DARK_PRESETS, LIGHT_PRESETS, TEXT_TONES, FONT_OPTIONS } from "../lib/themePresets";
 import { extractPageEdgeLines, extractStructuredTextFromPdfPage } from "../lib/pdfTextExtractor";
+import { configurePdfJsWorker } from "../lib/pdfjsConfig";
 import {
   Sparkles,
   Volume2,
@@ -24,17 +25,7 @@ import {
   Square,
 } from "lucide-react";
 
-// Configure worker to local public path for 100% offline, dev server, and Electron support
-try {
-  const isHttpOrigin =
-    typeof window !== "undefined" &&
-    (window.location.protocol === "http:" || window.location.protocol === "https:");
-  pdfjsLib.GlobalWorkerOptions.workerSrc = isHttpOrigin
-    ? new URL("pdf.worker.min.mjs", `${window.location.origin}/`).href
-    : new URL("pdf.worker.min.mjs", window.location.href).href;
-} catch {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.min.mjs";
-}
+configurePdfJsWorker();
 
 interface PdfViewerProps {
   pdfDoc: any | null;

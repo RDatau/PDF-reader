@@ -50,23 +50,10 @@ import { WindowsTitlebar } from "./components/WindowsTitlebar";
 import { loadGeminiSettings, saveGeminiSettings } from "./lib/geminiSettings";
 import { normalizeGeminiTtsModel } from "./lib/geminiModels";
 import { streamGeminiTtsAudio } from "./lib/geminiApiBridge";
+import { configurePdfJsWorker, openPdfDocument } from "./lib/pdfjsConfig";
 import { X } from "lucide-react";
 
-// Configure worker to local public path for 100% offline, dev server, and Electron support
-const resolvePublicAssetUrl = (subpath: string): string => {
-  try {
-    const isHttpOrigin =
-      typeof window !== "undefined" &&
-      (window.location.protocol === "http:" || window.location.protocol === "https:");
-    return isHttpOrigin
-      ? new URL(subpath, `${window.location.origin}/`).href
-      : new URL(subpath, window.location.href).href;
-  } catch {
-    return `./${subpath}`;
-  }
-};
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = resolvePublicAssetUrl("pdf.worker.min.mjs");
+configurePdfJsWorker();
 
 function toCleanArrayBuffer(rawData: unknown): ArrayBuffer | null {
   if (!rawData) return null;
@@ -397,29 +384,12 @@ export default function App() {
     }
 
     let isCancelled = false;
-    let activeTask: any = null;
     setIsDocLoading(true);
     setDocError(null);
 
-    const openWithPdfJs = async () => {
-      const cMapUrl = resolvePublicAssetUrl("cmaps/");
-      const standardFontDataUrl = resolvePublicAssetUrl("standard_fonts/");
-      const wasmUrl = resolvePublicAssetUrl("wasm/");
+    const loadHandle = openPdfDocument(pdfData);
 
-      const bufferCopy = pdfData.slice(0);
-      const task = pdfjsLib.getDocument({
-        data: new Uint8Array(bufferCopy),
-        cMapUrl,
-        cMapPacked: true,
-        standardFontDataUrl,
-        wasmUrl,
-        disableWorker: true,
-      } as any);
-      activeTask = task;
-      return await task.promise;
-    };
-
-    openWithPdfJs()
+    loadHandle.promise
       .then((doc) => {
         if (isCancelled) {
           (doc as any).destroy?.().catch(() => {});
@@ -441,9 +411,7 @@ export default function App() {
 
     return () => {
       isCancelled = true;
-      if (activeTask && typeof activeTask.destroy === "function") {
-        activeTask.destroy().catch(() => {});
-      }
+      loadHandle.cancel();
     };
   }, [pdfData]);
 

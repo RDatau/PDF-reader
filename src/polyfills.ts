@@ -193,6 +193,21 @@ if (typeof Uint8Array !== "undefined") {
   }
 }
 
+if (typeof URL !== "undefined" && typeof (URL as any).parse !== "function") {
+  Object.defineProperty(URL, "parse", {
+    value: function (url: string, base?: string | URL) {
+      try {
+        return base !== undefined ? new URL(url, base) : new URL(url);
+      } catch {
+        return null;
+      }
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+}
+
 if (typeof globalThis !== "undefined") {
   (globalThis as any).pdfjsVersion = "6.5.438";
 }
