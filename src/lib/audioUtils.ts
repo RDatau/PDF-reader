@@ -459,3 +459,102 @@ export function pcmChunksToWavBuffer(
   const durationSeconds = byteRate > 0 ? alignedPcmBytes / byteRate : 0;
   return { wavBuffer, durationSeconds };
 }
+
+export function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    parts.push(String.fromCharCode(...slice));
+  }
+  return btoa(parts.join(""));
+}
+
+export function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+function extractWavPcmData(wavBuffer: ArrayBuffer): {
+  pcm: Uint8Array;
+  sampleRate: number;
+  numChannels: number;
+  bitsPerSample: number;
+} | null {
+  if (!wavBuffer || wavBuffer.byteLength <= 44) return null;
+  const view = new DataView(wavBuffer);
+  const bytes = new Uint8Array(wavBuffer);
+  const readTag = (offset: number) =>
+    String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+
+  if (readTag(0) !== "RIFF" || readTag(8) !== "WAVE") {
+    return null;
+  }
+
+  let sampleRate = 24000;
+  let numChannels = 1;
+  let bitsPerSample = 16;
+  let dataStart = 44;
+  let dataLength = wavBuffer.byteLength - 44;
+
+  let offset = 12;
+  while (offset + 8 <= wavBuffer.byteLength) {
+    const chunkId = readTag(offset);
+    const chunkSize = view.getUint32(offset + 4, true);
+    if (chunkId === "fmt " && offset + 24 <= wavBuffer.byteLength) {
+      numChannels = view.getUint16(offset + 10, true) || 1;
+      sampleRate = view.getUint32(offset + 12, true) || 24000;
+      bitsPerSample = view.getUint16(offset + 22, true) || 16;
+    } else if (chunkId === "data") {
+      dataStart = offset + 8;
+      dataLength = Math.min(chunkSize, wavBuffer.byteLength - dataStart);
+      break;
+    }
+    offset += 8 + chunkSize + (chunkSize % 2);
+  }
+
+  if (dataLength <= 0) return null;
+  return {
+    pcm: bytes.subarray(dataStart, dataStart + dataLength),
+    sampleRate,
+    numChannels,
+    bitsPerSample,
+  };
+}
+
+/**
+ * Local fallback WAV merger used only when offline or when Python backend merge is unreachable.
+ */
+export function mergeWavArrayBuffersLocal(
+  wavBuffers: ArrayBuffer[],
+  silenceMs = 180
+): { wavBuffer: ArrayBuffer; durationSeconds: number } {
+  const pcmChunks: Uint8Array[] = [];
+  let sampleRate = 24000;
+  let numChannels = 1;
+  let bitsPerSample = 16;
+
+  for (let i = 0; i < wavBuffers.length; i++) {
+    const parsed = extractWavPcmData(wavBuffers[i]);
+    if (!parsed) continue;
+    if (pcmChunks.length === 0) {
+      sampleRate = parsed.sampleRate;
+      numChannels = parsed.numChannels;
+      bitsPerSample = parsed.bitsPerSample;
+    } else if (silenceMs > 0) {
+      const silenceSamples = Math.floor(sampleRate * (silenceMs / 1000));
+      const silenceBytes = silenceSamples * numChannels * (bitsPerSample / 8);
+      if (silenceBytes > 0) {
+        pcmChunks.push(new Uint8Array(silenceBytes));
+      }
+    }
+    pcmChunks.push(parsed.pcm);
+  }
+
+  return pcmChunksToWavBuffer(pcmChunks, sampleRate, numChannels, bitsPerSample);
+}

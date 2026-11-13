@@ -5,7 +5,10 @@ import {
   cleanPdfDisplayTitle,
   clearAllTtsClips,
   deleteTtsClip,
+  formatMergedPageTtsTitle,
   getTtsClipById,
+  mergePageWavClips,
+  saveTtsClip,
 } from "../lib/ttsAudioStorage";
 import {
   X,
@@ -19,6 +22,7 @@ import {
   Loader2,
   Volume2,
   FolderDown,
+  Layers,
 } from "lucide-react";
 
 interface TtsLibraryModalProps {
@@ -40,10 +44,12 @@ export const TtsLibraryModal: React.FC<TtsLibraryModalProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState("");
   const [scope, setScope] = useState<"all" | "current">("all");
+  const [kindFilter, setKindFilter] = useState<"all" | "merged" | "parts">("all");
   const [playingClipId, setPlayingClipId] = useState<string | null>(null);
   const [isPausedClip, setIsPausedClip] = useState(false);
   const [loadingClipId, setLoadingClipId] = useState<string | null>(null);
   const [downloadingClipId, setDownloadingClipId] = useState<string | null>(null);
+  const [mergingGroupKey, setMergingGroupKey] = useState<string | null>(null);
   const [isBatchDownloading, setIsBatchDownloading] = useState(false);
   const [confirmClearAll, setConfirmClearAll] = useState(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
@@ -79,12 +85,65 @@ export const TtsLibraryModal: React.FC<TtsLibraryModalProps> = ({
     };
   }, []);
 
+  const mergedCount = useMemo(
+    () => clips.filter((c) => Boolean(c.isMergedPage || c.id.endsWith("::full"))).length,
+    [clips]
+  );
+
+  // Detect pages that have >= 2 generated parts without a merged page entry yet
+  const unmergedPageGroups = useMemo(() => {
+    const groups = new Map<
+      string,
+      {
+        key: string;
+        docId: string;
+        docTitle: string;
+        pageNumber: number;
+        parts: StoredTtsAudioMeta[];
+        hasMerged: boolean;
+      }
+    >();
+
+    for (const clip of clips) {
+      if (scope === "current" && clip.docId !== currentDocId) continue;
+      if (clip.id.includes("::sel_")) continue;
+
+      const key = `${clip.docId}::p${clip.pageNumber}`;
+      let entry = groups.get(key);
+      if (!entry) {
+        entry = {
+          key,
+          docId: clip.docId,
+          docTitle: clip.docTitle,
+          pageNumber: clip.pageNumber,
+          parts: [],
+          hasMerged: false,
+        };
+        groups.set(key, entry);
+      }
+
+      if (clip.isMergedPage || clip.id.endsWith("::full")) {
+        entry.hasMerged = true;
+      } else if (clip.partNumber >= 1) {
+        entry.parts.push(clip);
+      }
+    }
+
+    return Array.from(groups.values())
+      .filter((g) => !g.hasMerged && g.parts.length >= 2)
+      .sort((a, b) => a.pageNumber - b.pageNumber);
+  }, [clips, scope, currentDocId]);
+
   const filteredClips = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const list = clips.filter((clip) => {
       if (scope === "current" && clip.docId !== currentDocId) {
         return false;
       }
+      const isMerged = Boolean(clip.isMergedPage || clip.id.endsWith("::full"));
+      if (kindFilter === "merged" && !isMerged) return false;
+      if (kindFilter === "parts" && isMerged) return false;
+
       if (!q) return true;
       return (
         clip.title.toLowerCase().includes(q) ||
@@ -94,19 +153,21 @@ export const TtsLibraryModal: React.FC<TtsLibraryModalProps> = ({
       );
     });
 
-    // Sort cleanly by document page & part order when viewing active doc, or newest doc batch with sequential parts
+    // Sort cleanly: merged page entry first inside each (docId, pageNumber) group, followed by 01, 02, ...
     return [...list].sort((a, b) => {
+      if (a.docId === b.docId && a.pageNumber === b.pageNumber) {
+        const aMerged = Boolean(a.isMergedPage || a.id.endsWith("::full"));
+        const bMerged = Boolean(b.isMergedPage || b.id.endsWith("::full"));
+        if (aMerged !== bMerged) return aMerged ? -1 : 1;
+        if (a.partNumber !== b.partNumber) return a.partNumber - b.partNumber;
+      }
       if (scope === "current") {
         if (a.pageNumber !== b.pageNumber) return a.pageNumber - b.pageNumber;
-        if (a.partNumber !== b.partNumber) return a.partNumber - b.partNumber;
         return b.createdAt - a.createdAt;
-      }
-      if (a.docId === b.docId && a.pageNumber === b.pageNumber) {
-        return a.partNumber - b.partNumber;
       }
       return b.createdAt - a.createdAt;
     });
-  }, [clips, scope, currentDocId, searchQuery]);
+  }, [clips, scope, kindFilter, currentDocId, searchQuery]);
 
   if (!isOpen) return null;
 
@@ -133,6 +194,70 @@ export const TtsLibraryModal: React.FC<TtsLibraryModalProps> = ({
   };
 
   const totalBytes = clips.reduce((acc, c) => acc + (c.sizeBytes || 0), 0);
+
+  const handleMergeGroup = async (group: {
+    key: string;
+    docId: string;
+    docTitle: string;
+    pageNumber: number;
+    parts: StoredTtsAudioMeta[];
+  }) => {
+    if (mergingGroupKey) return;
+    setMergingGroupKey(group.key);
+    setPlaybackError(null);
+    try {
+      const sortedParts = [...group.parts].sort((a, b) => a.partNumber - b.partNumber);
+      const loadedBuffers: ArrayBuffer[] = [];
+      let firstVoice = sortedParts[0]?.voice || "Kore";
+      let firstModel = sortedParts[0]?.model || "gemini-3.8-flash-lite-tts";
+      let firstExcerpt = sortedParts[0]?.textExcerpt || "";
+
+      for (const meta of sortedParts) {
+        const full = await getTtsClipById(meta.id);
+        if (full?.audioData && full.audioData.byteLength > 44) {
+          loadedBuffers.push(full.audioData);
+        }
+      }
+
+      if (loadedBuffers.length === 0) {
+        setPlaybackError("Data bagian audio tidak ditemukan untuk digabungkan.");
+        return;
+      }
+
+      const { wavBuffer, durationSeconds, mergedBy } = await mergePageWavClips(
+        loadedBuffers,
+        180
+      );
+      const mergedTitle = formatMergedPageTtsTitle(group.docTitle, group.pageNumber);
+      await saveTtsClip({
+        id: `${group.docId}::p${group.pageNumber}::full`,
+        title: mergedTitle,
+        docId: group.docId,
+        docTitle: group.docTitle,
+        pageNumber: group.pageNumber,
+        partNumber: 0,
+        totalParts: loadedBuffers.length,
+        textExcerpt:
+          firstExcerpt ||
+          `Gabungan lengkap ${loadedBuffers.length} bagian audio halaman ${group.pageNumber}`,
+        voice: firstVoice,
+        model: firstModel,
+        durationSeconds,
+        sizeBytes: wavBuffer.byteLength,
+        mimeType: "audio/wav",
+        audioData: wavBuffer,
+        createdAt: Date.now(),
+        isMergedPage: true,
+        mergedBy,
+      });
+
+      await onRefreshClips();
+    } catch (err: any) {
+      setPlaybackError(err?.message || "Gagal menggabungkan bagian audio halaman.");
+    } finally {
+      setMergingGroupKey(null);
+    }
+  };
 
   const handlePlayToggle = async (clip: StoredTtsAudioMeta) => {
     setPlaybackError(null);
@@ -270,7 +395,8 @@ export const TtsLibraryModal: React.FC<TtsLibraryModalProps> = ({
                 HASIL GENERATE AUDIO TTS
               </h3>
               <p className="text-[10px] font-mono text-gray-400">
-                {clips.length} AUDIO TERSIMPAN DI DATABASE LOKAL ({formatFileSize(totalBytes)})
+                {clips.length} AUDIO TERSIMPAN ({mergedCount} GABUNGAN HALAMAN &bull;{" "}
+                {formatFileSize(totalBytes)})
               </p>
             </div>
           </div>
@@ -286,7 +412,7 @@ export const TtsLibraryModal: React.FC<TtsLibraryModalProps> = ({
         </div>
 
         {/* Search & Filter Controls */}
-        <div className="p-3 border-b border-[#222731] bg-[#0F131A] space-y-2.5">
+        <div className="p-3 border-b border-[#222731] bg-[#0F131A] space-y-2">
           <div className="flex flex-col sm:flex-row gap-2">
             <div className="relative flex-1">
               <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
@@ -327,6 +453,72 @@ export const TtsLibraryModal: React.FC<TtsLibraryModalProps> = ({
             </div>
           </div>
 
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-1 bg-[#14171D] border border-[#252B36] rounded-lg p-0.5 text-[11px]">
+              <button
+                type="button"
+                onClick={() => setKindFilter("all")}
+                className={`px-2.5 py-1 rounded-md font-semibold transition-colors cursor-pointer ${
+                  kindFilter === "all"
+                    ? "bg-[#262E3D] text-white"
+                    : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                Semua Tipe
+              </button>
+              <button
+                type="button"
+                onClick={() => setKindFilter("merged")}
+                className={`px-2.5 py-1 rounded-md font-semibold transition-colors cursor-pointer flex items-center gap-1 ${
+                  kindFilter === "merged"
+                    ? "bg-indigo-600 text-white"
+                    : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                <Layers className="w-3 h-3" />
+                <span>Gabungan Halaman ({mergedCount})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setKindFilter("parts")}
+                className={`px-2.5 py-1 rounded-md font-semibold transition-colors cursor-pointer ${
+                  kindFilter === "parts"
+                    ? "bg-[#262E3D] text-white"
+                    : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                Per Bagian ({Math.max(0, clips.length - mergedCount)})
+              </button>
+            </div>
+          </div>
+
+          {unmergedPageGroups.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-2.5 py-1.5 text-[11px] text-indigo-200">
+              <Layers className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+              <span>Halaman siap digabung via Python:</span>
+              {unmergedPageGroups.map((g) => (
+                <button
+                  key={g.key}
+                  type="button"
+                  onClick={() => handleMergeGroup(g)}
+                  disabled={Boolean(mergingGroupKey)}
+                  className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-[10px] flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-60"
+                  title={`Gabungkan ${g.parts.length} bagian audio dari ${g.docTitle} Hal ${g.pageNumber}`}
+                >
+                  {mergingGroupKey === g.key ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <Layers className="w-3 h-3" />
+                  )}
+                  <span>
+                    Gabung {g.docTitle.slice(0, 18)}
+                    {g.docTitle.length > 18 ? "…" : ""} - Hal {g.pageNumber} ({g.parts.length})
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
           {playbackError && (
             <div className="text-[11px] text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg px-2.5 py-1.5">
               {playbackError}
@@ -345,11 +537,12 @@ export const TtsLibraryModal: React.FC<TtsLibraryModalProps> = ({
                   : "TIDAK ADA AUDIO TTS YANG COCOK"}
               </p>
               <p className="text-[11px] text-gray-500 max-w-md mx-auto leading-relaxed">
-                Setiap kali Anda memutar halaman menggunakan <strong>Gemini AI Audio</strong>, setiap bagian audio yang dihasilkan (01, 02, dst.) akan otomatis tersimpan di database lokal dan siap diunduh sebagai file <strong>.wav</strong> sesuai judul PDF &amp; halamannya.
+                Setiap kali Anda memutar halaman menggunakan <strong>Gemini AI Audio</strong>, setiap bagian (01, 02, dst.) tersimpan otomatis dan langsung digabung oleh <strong>Python</strong> menjadi 1 file utuh per halaman setelah seluruh bagian halaman tersebut selesai digenerate.
               </p>
             </div>
           ) : (
             filteredClips.map((clip) => {
+              const isMerged = Boolean(clip.isMergedPage || clip.id.endsWith("::full"));
               const isPlayingThis = playingClipId === clip.id && !isPausedClip;
               const isPausedThis = playingClipId === clip.id && isPausedClip;
               const isLoadingThis = loadingClipId === clip.id;
@@ -362,31 +555,57 @@ export const TtsLibraryModal: React.FC<TtsLibraryModalProps> = ({
                   className={`p-3 rounded-lg border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
                     playingClipId === clip.id
                       ? "border-emerald-500/60 bg-emerald-600/10"
+                      : isMerged
+                      ? "border-indigo-500/40 bg-indigo-950/20 hover:border-indigo-400/60"
                       : "border-[#252B36] hover:border-gray-600 bg-[#0F1115]/80"
                   }`}
                 >
                   <div className="min-w-0 flex-1 space-y-1">
-                    <div className="flex items-center gap-2">
-                      <Volume2
-                        className={`w-3.5 h-3.5 shrink-0 ${
-                          isPlayingThis ? "text-emerald-400 animate-pulse" : "text-blue-400"
-                        }`}
-                      />
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {isMerged ? (
+                        <Layers
+                          className={`w-3.5 h-3.5 shrink-0 ${
+                            isPlayingThis ? "text-emerald-400 animate-pulse" : "text-indigo-400"
+                          }`}
+                        />
+                      ) : (
+                        <Volume2
+                          className={`w-3.5 h-3.5 shrink-0 ${
+                            isPlayingThis ? "text-emerald-400 animate-pulse" : "text-blue-400"
+                          }`}
+                        />
+                      )}
                       <span
                         className="text-xs font-bold text-gray-100 truncate"
                         title={clip.title}
                       >
                         {clip.title}
                       </span>
+                      {isMerged && (
+                        <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 border border-indigo-500/40 text-indigo-300 text-[9px] font-bold uppercase tracking-wider shrink-0">
+                          Gabungan Halaman
+                          {clip.mergedBy === "python"
+                            ? " • Python"
+                            : clip.mergedBy === "local"
+                            ? " • Lokal"
+                            : ""}
+                        </span>
+                      )}
                     </div>
 
                     <div className="text-[10px] font-mono text-gray-400 flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-5">
                       <span className="text-emerald-300/90">Hal {clip.pageNumber}</span>
                       <span>&bull;</span>
-                      <span>
-                        Bagian {String(clip.partNumber).padStart(2, "0")}/
-                        {String(clip.totalParts).padStart(2, "0")}
-                      </span>
+                      {isMerged ? (
+                        <span className="text-indigo-300">
+                          Gabungan {clip.totalParts} Bagian
+                        </span>
+                      ) : (
+                        <span>
+                          Bagian {String(clip.partNumber).padStart(2, "0")}/
+                          {String(clip.totalParts).padStart(2, "0")}
+                        </span>
+                      )}
                       <span>&bull;</span>
                       <span>{formatDuration(clip.durationSeconds)}</span>
                       <span>&bull;</span>
@@ -438,7 +657,11 @@ export const TtsLibraryModal: React.FC<TtsLibraryModalProps> = ({
                       type="button"
                       onClick={() => handleDownloadClip(clip)}
                       disabled={isDownloadingThis}
-                      className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs active:scale-95 transition-all cursor-pointer disabled:opacity-60"
+                      className={`px-2.5 py-1.5 rounded-lg text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs active:scale-95 transition-all cursor-pointer disabled:opacity-60 ${
+                        isMerged
+                          ? "bg-indigo-600 hover:bg-indigo-500"
+                          : "bg-emerald-600 hover:bg-emerald-500"
+                      }`}
                       title={`Unduh sebagai ${downloadFilename}`}
                     >
                       {isDownloadingThis ? (

@@ -2,6 +2,8 @@ import express from "express";
 import http from "http";
 import path from "path";
 import fs from "fs";
+import os from "os";
+import { spawn } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import {
   GoogleGenAI,
@@ -17,7 +19,7 @@ dotenv.config();
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(express.json({ limit: "25mb" }));
+app.use(express.json({ limit: "60mb" }));
 
 // Global safety settings: BLOCK_NONE across all harm categories
 const SAFETY_SETTINGS_BLOCK_NONE = [
@@ -702,6 +704,128 @@ app.post("/api/tts", async (req, res) => {
     res.status(500).json({
       error: error?.message || "Failed to generate speech with Gemini TTS",
     });
+  }
+});
+
+function runPythonMergeScript(
+  scriptPath: string,
+  args: string[]
+): Promise<{ stdout: string; stderr: string }> {
+  const trySpawn = (cmd: string) =>
+    new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn(cmd, [scriptPath, ...args], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on("error", (err: NodeJS.ErrnoException) => reject(err));
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve({ stdout, stderr });
+        } else {
+          reject(new Error(stderr.trim() || `Python exited with code ${code}`));
+        }
+      });
+    });
+
+  return trySpawn("python3").catch((err: any) => {
+    if (err?.code === "ENOENT") {
+      return trySpawn("python");
+    }
+    throw err;
+  });
+}
+
+// Merge multiple generated WAV TTS clips for a page using the Python script
+app.post("/api/tts/merge", async (req, res) => {
+  let tempDir: string | null = null;
+  try {
+    const rawParts = Array.isArray(req.body?.parts) ? req.body.parts : [];
+    const silenceMs = Math.max(0, Math.min(2000, Number(req.body?.silenceMs ?? 180) || 0));
+
+    if (rawParts.length === 0) {
+      res.status(400).json({ error: "Daftar bagian audio WAV tidak boleh kosong." });
+      return;
+    }
+
+    const candidateScripts = [
+      path.join(process.cwd(), "scripts", "merge_tts.py"),
+      path.resolve(process.cwd(), "..", "scripts", "merge_tts.py"),
+    ];
+    const scriptPath = candidateScripts.find((p) => fs.existsSync(p));
+    if (!scriptPath) {
+      res.status(500).json({ error: "Skrip Python scripts/merge_tts.py tidak ditemukan." });
+      return;
+    }
+
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "voxreader-tts-merge-"));
+    const inputPaths: string[] = [];
+
+    for (let i = 0; i < rawParts.length; i++) {
+      const b64 = typeof rawParts[i] === "string" ? rawParts[i].trim() : "";
+      if (!b64) continue;
+      const buf = Buffer.from(b64, "base64");
+      if (buf.length <= 44) continue;
+      const partPath = path.join(tempDir, `part_${String(i).padStart(3, "0")}.wav`);
+      fs.writeFileSync(partPath, buf);
+      inputPaths.push(partPath);
+    }
+
+    if (inputPaths.length === 0) {
+      res.status(400).json({ error: "Tidak ada data WAV valid yang dapat digabungkan." });
+      return;
+    }
+
+    const outputPath = path.join(tempDir, "merged_page.wav");
+    const { stdout } = await runPythonMergeScript(scriptPath, [
+      "--output",
+      outputPath,
+      "--silence-ms",
+      String(silenceMs),
+      ...inputPaths,
+    ]);
+
+    if (!fs.existsSync(outputPath)) {
+      res.status(500).json({ error: "File hasil gabungan Python tidak ditemukan." });
+      return;
+    }
+
+    const mergedBuf = fs.readFileSync(outputPath);
+    let meta: any = {};
+    try {
+      meta = JSON.parse(stdout.trim() || "{}");
+    } catch {
+      meta = {};
+    }
+
+    res.json({
+      ok: true,
+      audio: mergedBuf.toString("base64"),
+      mimeType: "audio/wav",
+      durationSeconds: Number(meta.durationSeconds || 0),
+      sizeBytes: mergedBuf.length,
+      partsMerged: Number(meta.partsMerged || inputPaths.length),
+      mergedBy: "python",
+    });
+  } catch (error: any) {
+    console.error("Error merging TTS audio with Python:", error);
+    res.status(500).json({
+      error: error?.message || "Gagal menggabungkan audio TTS dengan skrip Python.",
+    });
+  } finally {
+    if (tempDir) {
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup errors
+      }
+    }
   }
 });
 

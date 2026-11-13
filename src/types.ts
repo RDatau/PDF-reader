@@ -71,6 +71,8 @@ export interface StoredTtsAudio {
   mimeType: string;
   audioData: ArrayBuffer;
   createdAt: number;
+  isMergedPage?: boolean;
+  mergedBy?: "python" | "local";
 }
 
 export type StoredTtsAudioMeta = Omit<StoredTtsAudio, "audioData">;

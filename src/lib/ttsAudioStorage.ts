@@ -1,4 +1,10 @@
 import { StoredTtsAudio, StoredTtsAudioMeta } from "../types";
+import { getApiBaseUrl } from "./apiConfig";
+import {
+  arrayBufferToBase64,
+  base64ToArrayBuffer,
+  mergeWavArrayBuffersLocal,
+} from "./audioUtils";
 
 const DB_NAME = "voxreader_tts_audio_store";
 const DB_VERSION = 1;
@@ -42,6 +48,11 @@ export function formatTtsClipTitle(
   return `${baseTitle} - Hal ${pageNumber} - ${partStr}`;
 }
 
+export function formatMergedPageTtsTitle(docName: string, pageNumber: number): string {
+  const baseTitle = cleanPdfDisplayTitle(docName);
+  return `${baseTitle} - Hal ${pageNumber}`;
+}
+
 export function buildTtsDownloadFilename(title: string, extension = "wav"): string {
   const sanitized = (title || "VOXReader_TTS")
     .replace(/[\\/:*?"<>|]+/g, "-")
@@ -49,6 +60,51 @@ export function buildTtsDownloadFilename(title: string, extension = "wav"): stri
     .trim();
   const safeBase = sanitized || "VOXReader_TTS";
   return `${safeBase}.${extension}`;
+}
+
+export async function mergePageWavClips(
+  wavBuffers: ArrayBuffer[],
+  silenceMs = 180
+): Promise<{
+  wavBuffer: ArrayBuffer;
+  durationSeconds: number;
+  mergedBy: "python" | "local";
+}> {
+  const validBuffers = wavBuffers.filter((b) => b && b.byteLength > 44);
+  if (validBuffers.length === 0) {
+    throw new Error("Tidak ada audio WAV yang dapat digabungkan.");
+  }
+
+  try {
+    const apiBase = getApiBaseUrl();
+    const parts = validBuffers.map((buf) => arrayBufferToBase64(buf));
+    const res = await fetch(`${apiBase}/api/tts/merge`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ parts, silenceMs }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.ok && typeof data?.audio === "string" && data.audio.length > 0) {
+        const wavBuffer = base64ToArrayBuffer(data.audio);
+        return {
+          wavBuffer,
+          durationSeconds: Number(data.durationSeconds || 0),
+          mergedBy: "python",
+        };
+      }
+    }
+  } catch (err) {
+    console.warn("Python /api/tts/merge tidak tersedia, memakai penggabung WAV lokal:", err);
+  }
+
+  const localMerged = mergeWavArrayBuffersLocal(validBuffers, silenceMs);
+  return {
+    wavBuffer: localMerged.wavBuffer,
+    durationSeconds: localMerged.durationSeconds,
+    mergedBy: "local",
+  };
 }
 
 export async function saveTtsClip(clip: StoredTtsAudio): Promise<void> {
@@ -89,6 +145,8 @@ export async function cleanupStalePageParts(
         if (
           item.pageNumber === pageNumber &&
           !item.id.includes("::sel_") &&
+          !item.isMergedPage &&
+          !item.id.endsWith("::full") &&
           item.partNumber > maxPartNumber
         ) {
           store.delete(item.id);
@@ -124,9 +182,17 @@ export async function getAllTtsClipsMeta(): Promise<StoredTtsAudioMeta[]> {
         sizeBytes: c.sizeBytes,
         mimeType: c.mimeType,
         createdAt: c.createdAt,
+        isMergedPage: c.isMergedPage,
+        mergedBy: c.mergedBy,
       }));
-      // Sort by newest batch / page / part order
+      // Sort by newest batch / page / merged-first then part order
       meta.sort((a, b) => {
+        if (a.docId === b.docId && a.pageNumber === b.pageNumber) {
+          if (Boolean(a.isMergedPage) !== Boolean(b.isMergedPage)) {
+            return a.isMergedPage ? -1 : 1;
+          }
+          return a.partNumber - b.partNumber;
+        }
         if (b.createdAt !== a.createdAt) return b.createdAt - a.createdAt;
         if (a.pageNumber !== b.pageNumber) return a.pageNumber - b.pageNumber;
         return a.partNumber - b.partNumber;

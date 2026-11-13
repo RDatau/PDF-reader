@@ -33,8 +33,10 @@ import {
 import {
   cleanPdfDisplayTitle,
   cleanupStalePageParts,
+  formatMergedPageTtsTitle,
   formatTtsClipTitle,
   getAllTtsClipsMeta,
+  mergePageWavClips,
   saveTtsClip,
 } from "./lib/ttsAudioStorage";
 import { generateSamplePdfArrayBuffer } from "./lib/samplePdf";
@@ -832,6 +834,9 @@ export default function App() {
       }
     }, 180);
 
+    const pagePartWavBuffers: ArrayBuffer[] = [];
+    const pagePartExcerpts: string[] = [];
+
     try {
       for (let i = 0; i < blocks.length; i++) {
         if (controller.signal.aborted) return;
@@ -879,6 +884,10 @@ export default function App() {
         if (!controller.signal.aborted && pcmChunks.length > 0) {
           try {
             const { wavBuffer, durationSeconds } = pcmChunksToWavBuffer(pcmChunks, 24000, 1, 16);
+            if (!isSelection) {
+              pagePartWavBuffers.push(wavBuffer.slice(0));
+              pagePartExcerpts.push(blocks[i].block.slice(0, 90));
+            }
             const partNumber = i + 1;
             const partStr = String(partNumber).padStart(2, "0");
             const clipTitle = formatTtsClipTitle(
@@ -919,8 +928,48 @@ export default function App() {
         }
       }
 
+      // After all TTS parts on the same page succeed, merge them into one page WAV via Python
+      const mergeAndSaveFullPage = async () => {
+        if (controller.signal.aborted || isSelection || pagePartWavBuffers.length === 0) {
+          return;
+        }
+        try {
+          const { wavBuffer, durationSeconds, mergedBy } = await mergePageWavClips(
+            pagePartWavBuffers,
+            180
+          );
+          const mergedTitle = formatMergedPageTtsTitle(snapshotDocName, snapshotPage);
+          const mergedClipId = `${snapshotDocId}::p${snapshotPage}::full`;
+
+          await saveTtsClip({
+            id: mergedClipId,
+            title: mergedTitle,
+            docId: snapshotDocId,
+            docTitle: cleanPdfDisplayTitle(snapshotDocName),
+            pageNumber: snapshotPage,
+            partNumber: 0,
+            totalParts: pagePartWavBuffers.length,
+            textExcerpt:
+              pagePartExcerpts[0] ||
+              `Gabungan lengkap ${pagePartWavBuffers.length} bagian audio halaman ${snapshotPage}`,
+            voice: geminiVoice,
+            model: geminiTtsModel,
+            durationSeconds,
+            sizeBytes: wavBuffer.byteLength,
+            mimeType: "audio/wav",
+            audioData: wavBuffer,
+            createdAt: Date.now(),
+            isMergedPage: true,
+            mergedBy,
+          });
+          void refreshTtsClipsList();
+        } catch (mergeErr) {
+          console.warn("Gagal menggabungkan audio TTS halaman:", mergeErr);
+        }
+      };
+
       if (!controller.signal.aborted) {
-        await player.waitUntilDrain();
+        await Promise.all([player.waitUntilDrain(), mergeAndSaveFullPage()]);
       }
 
       if (!controller.signal.aborted) {
