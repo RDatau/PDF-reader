@@ -57,6 +57,8 @@ interface PdfViewerProps {
   onAskAiAboutText: (text: string) => void;
   searchQuery?: string;
   onStopSpeaking?: () => void;
+  onOpenOtherPdf?: () => void;
+  onLoadSamplePdf?: () => void;
 }
 
 export const PdfViewer: React.FC<PdfViewerProps> = ({
@@ -77,6 +79,8 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
   onReadSelectedText,
   onAskAiAboutText,
   onStopSpeaking,
+  onOpenOtherPdf,
+  onLoadSamplePdf,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -722,9 +726,29 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
 
       {/* Error state */}
       {error && (
-        <div className="max-w-md p-6 my-auto text-center rounded bg-rose-500/10 border border-rose-500/30 text-rose-400">
-          <p className="text-sm font-semibold mb-2">Gagal Membuka PDF</p>
-          <p className="text-xs">{error}</p>
+        <div className="max-w-md p-6 my-auto text-center rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 space-y-3">
+          <p className="text-sm font-semibold">Gagal Membuka PDF</p>
+          <p className="text-xs leading-relaxed text-rose-200/90 break-words">{error}</p>
+          {(onOpenOtherPdf || onLoadSamplePdf) && (
+            <div className="flex items-center justify-center gap-2 pt-2">
+              {onOpenOtherPdf && (
+                <button
+                  onClick={onOpenOtherPdf}
+                  className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium cursor-pointer transition-colors"
+                >
+                  Buka PDF Lain
+                </button>
+              )}
+              {onLoadSamplePdf && (
+                <button
+                  onClick={onLoadSamplePdf}
+                  className="px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-gray-200 text-xs font-medium cursor-pointer border border-neutral-700 transition-colors"
+                >
+                  Buka Dokumen Contoh
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
 

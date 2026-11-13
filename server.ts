@@ -1132,18 +1132,24 @@ PANDUAN: Jika pengguna meminta Anda membacakan teks ("bacakan", "baca", "bacakan
     res.status(404).json({ error: "API endpoint not found" });
   });
 
-  // Serve PDF.js CMaps directly (and return 404 if a CMap file doesn't exist so SPA never returns HTML)
-  const publicCmapsDir = path.join(process.cwd(), "public", "cmaps");
-  const nodeModulesCmapsDir = path.join(process.cwd(), "node_modules", "pdfjs-dist", "cmaps");
-  if (fs.existsSync(publicCmapsDir)) {
-    app.use("/cmaps", express.static(publicCmapsDir, { fallthrough: true }));
-  }
-  if (fs.existsSync(nodeModulesCmapsDir)) {
-    app.use("/cmaps", express.static(nodeModulesCmapsDir, { fallthrough: true }));
-  }
-  app.use("/cmaps", (_req, res) => {
-    res.status(404).end();
-  });
+  // Serve PDF.js CMaps, standard fonts, and WASM decoders directly (never fall through to SPA HTML on 404)
+  const mountPdfAssetDir = (route: string, publicSubdir: string, nodeSubdir: string) => {
+    const pubDir = path.join(process.cwd(), "public", publicSubdir);
+    const modDir = path.join(process.cwd(), "node_modules", "pdfjs-dist", nodeSubdir);
+    if (fs.existsSync(pubDir)) {
+      app.use(route, express.static(pubDir, { fallthrough: true }));
+    }
+    if (fs.existsSync(modDir)) {
+      app.use(route, express.static(modDir, { fallthrough: true }));
+    }
+    app.use(route, (_req, res) => {
+      res.status(404).end();
+    });
+  };
+
+  mountPdfAssetDir("/cmaps", "cmaps", "cmaps");
+  mountPdfAssetDir("/standard_fonts", "standard_fonts", "standard_fonts");
+  mountPdfAssetDir("/wasm", "wasm", "wasm");
 
   // Vite middleware in dev or static serving in production
   let viteServer: any = null;

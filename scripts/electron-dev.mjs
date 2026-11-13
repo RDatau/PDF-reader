@@ -1,19 +1,35 @@
 import { spawn, execFileSync } from "child_process";
 import http from "http";
 import path from "path";
+import { createRequire } from "module";
 import { fileURLToPath } from "url";
 
+const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
 const port = Number(process.env.PORT) || 3000;
 const targetUrl = `http://localhost:${port}`;
 const healthUrl = `${targetUrl}/api/health`;
 
-function checkServerHealth(timeoutMs = 1000) {
+function checkServerHealth(timeoutMs = 1200) {
   return new Promise((resolve) => {
     const req = http.get(healthUrl, { timeout: timeoutMs }, (res) => {
-      res.resume();
-      resolve(res.statusCode === 200);
+      let body = "";
+      res.on("data", (chunk) => {
+        body += chunk.toString();
+      });
+      res.on("end", () => {
+        if (res.statusCode !== 200) {
+          resolve(false);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(body);
+          resolve(parsed?.status === "ok");
+        } catch {
+          resolve(false);
+        }
+      });
     });
     req.on("timeout", () => {
       req.destroy();
@@ -26,7 +42,7 @@ function checkServerHealth(timeoutMs = 1000) {
 async function waitForServer(maxWaitMs = 25000) {
   const deadline = Date.now() + maxWaitMs;
   while (Date.now() < deadline) {
-    if (await checkServerHealth(800)) {
+    if (await checkServerHealth(1000)) {
       return true;
     }
     await new Promise((r) => setTimeout(r, 300));
@@ -47,6 +63,18 @@ function killProcessTree(proc) {
   } catch {
     // ignore cleanup errors if process already exited
   }
+}
+
+function resolveElectronBinary() {
+  try {
+    const binPath = require("electron");
+    if (typeof binPath === "string" && binPath.length > 0) {
+      return binPath;
+    }
+  } catch {
+    // fallback below
+  }
+  return null;
 }
 
 async function main() {
@@ -74,17 +102,18 @@ async function main() {
     process.exit(0);
   });
 
-  const alreadyRunning = await checkServerHealth(800);
+  const alreadyRunning = await checkServerHealth(1000);
   if (!alreadyRunning) {
     console.log(`[electron:dev] Memulai server dev di ${targetUrl}...`);
-    const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-    serverProc = spawn(npmCmd, ["run", "dev"], {
+    const tsxCli = path.join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs");
+    const serverTs = path.join(projectRoot, "server.ts");
+
+    serverProc = spawn(process.execPath, [tsxCli, serverTs], {
       cwd: projectRoot,
       env: {
         ...process.env,
         PORT: String(port),
       },
-      shell: process.platform === "win32",
       stdio: "inherit",
     });
 
@@ -107,25 +136,18 @@ async function main() {
   }
 
   console.log("[electron:dev] Membuka Electron...");
-  const npxCmd = process.platform === "win32" ? "npx.cmd" : "npx";
-  const localElectron = path.join(
-    projectRoot,
-    "node_modules",
-    ".bin",
-    process.platform === "win32" ? "electron.cmd" : "electron"
-  );
-
-  electronProc = spawn(localElectron, ["."], {
-    cwd: projectRoot,
-    env: {
-      ...process.env,
-      ELECTRON_START_URL: targetUrl,
-    },
-    shell: process.platform === "win32",
-    stdio: "inherit",
-  });
-
-  electronProc.on("error", () => {
+  const electronBinary = resolveElectronBinary();
+  if (electronBinary) {
+    electronProc = spawn(electronBinary, ["."], {
+      cwd: projectRoot,
+      env: {
+        ...process.env,
+        ELECTRON_START_URL: targetUrl,
+      },
+      stdio: "inherit",
+    });
+  } else {
+    const npxCmd = process.platform === "win32" ? "npx.cmd" : "npx";
     electronProc = spawn(npxCmd, ["electron", "."], {
       cwd: projectRoot,
       env: {
@@ -135,7 +157,7 @@ async function main() {
       shell: process.platform === "win32",
       stdio: "inherit",
     });
-  });
+  }
 
   electronProc.on("exit", (code) => {
     cleanup();

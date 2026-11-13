@@ -17,7 +17,9 @@ export default defineConfig(({ command }) => {
           'apple-touch-icon.png',
           'icon.svg',
           'pdf.worker.min.mjs',
-          'cmaps/*'
+          'cmaps/*',
+          'standard_fonts/*',
+          'wasm/*'
         ],
         manifest: {
           id: '/',
@@ -52,7 +54,7 @@ export default defineConfig(({ command }) => {
           ],
         },
         workbox: {
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,mjs,bcmap}'],
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,mjs,bcmap,wasm,pfb,ttf}'],
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,

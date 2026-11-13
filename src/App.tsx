@@ -30,15 +30,45 @@ import { streamGeminiTtsAudio } from "./lib/geminiApiBridge";
 import { X } from "lucide-react";
 
 // Configure worker to local public path for 100% offline, dev server, and Electron support
-try {
-  const isHttpOrigin =
-    typeof window !== "undefined" &&
-    (window.location.protocol === "http:" || window.location.protocol === "https:");
-  pdfjsLib.GlobalWorkerOptions.workerSrc = isHttpOrigin
-    ? new URL("pdf.worker.min.mjs", `${window.location.origin}/`).href
-    : new URL("pdf.worker.min.mjs", window.location.href).href;
-} catch {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.min.mjs";
+const resolvePublicAssetUrl = (subpath: string): string => {
+  try {
+    const isHttpOrigin =
+      typeof window !== "undefined" &&
+      (window.location.protocol === "http:" || window.location.protocol === "https:");
+    return isHttpOrigin
+      ? new URL(subpath, `${window.location.origin}/`).href
+      : new URL(subpath, window.location.href).href;
+  } catch {
+    return `./${subpath}`;
+  }
+};
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = resolvePublicAssetUrl("pdf.worker.min.mjs");
+
+function toCleanArrayBuffer(rawData: unknown): ArrayBuffer | null {
+  if (!rawData) return null;
+  try {
+    if (rawData instanceof ArrayBuffer) {
+      return rawData.byteLength > 0 ? rawData.slice(0) : null;
+    }
+    if (typeof SharedArrayBuffer !== "undefined" && rawData instanceof SharedArrayBuffer) {
+      return rawData.byteLength > 0 ? new Uint8Array(rawData).slice().buffer : null;
+    }
+    if (ArrayBuffer.isView(rawData)) {
+      if (rawData.byteLength === 0) return null;
+      return new Uint8Array(rawData.buffer, rawData.byteOffset, rawData.byteLength).slice().buffer;
+    }
+    const obj = rawData as any;
+    if (obj?.type === "Buffer" && Array.isArray(obj.data)) {
+      return obj.data.length > 0 ? new Uint8Array(obj.data).buffer : null;
+    }
+    if (typeof obj?.byteLength === "number" && obj.byteLength > 0) {
+      return new Uint8Array(obj).slice().buffer;
+    }
+  } catch (err) {
+    console.warn("Failed to normalize PDF buffer:", err);
+  }
+  return null;
 }
 
 export default function App() {
@@ -219,13 +249,7 @@ export default function App() {
           const fullDoc = await getDocumentById(mostRecent.id);
           if (isCancelled) return;
           if (fullDoc && fullDoc.data) {
-            const rawData: any = fullDoc.data;
-            const normalizedBuffer =
-              rawData instanceof ArrayBuffer
-                ? rawData.slice(0)
-                : ArrayBuffer.isView(rawData)
-                ? new Uint8Array(rawData.buffer, rawData.byteOffset, rawData.byteLength).slice().buffer
-                : null;
+            const normalizedBuffer = toCleanArrayBuffer(fullDoc.data);
             if (normalizedBuffer && normalizedBuffer.byteLength > 0) {
               setCurrentDocId(fullDoc.id);
               setCurrentDocName(fullDoc.name);
@@ -301,31 +325,29 @@ export default function App() {
     }
 
     let isCancelled = false;
+    let activeTask: any = null;
     setIsDocLoading(true);
     setDocError(null);
 
-    // CRITICAL: Slicing the ArrayBuffer guarantees that PDF.js worker transfer
-    // never detaches the original ArrayBuffer in state or storage!
-    let resolvedCMapUrl = "./cmaps/";
-    try {
-      const isHttpOrigin =
-        typeof window !== "undefined" &&
-        (window.location.protocol === "http:" || window.location.protocol === "https:");
-      resolvedCMapUrl = isHttpOrigin
-        ? new URL("cmaps/", `${window.location.origin}/`).href
-        : new URL("cmaps/", window.location.href).href;
-    } catch {
-      resolvedCMapUrl = "./cmaps/";
-    }
+    const openWithPdfJs = async () => {
+      const cMapUrl = resolvePublicAssetUrl("cmaps/");
+      const standardFontDataUrl = resolvePublicAssetUrl("standard_fonts/");
+      const wasmUrl = resolvePublicAssetUrl("wasm/");
 
-    const bufferCopy = pdfData.slice(0);
-    const loadTask = pdfjsLib.getDocument({
-      data: new Uint8Array(bufferCopy),
-      cMapUrl: resolvedCMapUrl,
-      cMapPacked: true,
-    });
+      const bufferCopy = pdfData.slice(0);
+      const task = pdfjsLib.getDocument({
+        data: new Uint8Array(bufferCopy),
+        cMapUrl,
+        cMapPacked: true,
+        standardFontDataUrl,
+        wasmUrl,
+        disableWorker: true,
+      } as any);
+      activeTask = task;
+      return await task.promise;
+    };
 
-    loadTask.promise
+    openWithPdfJs()
       .then((doc) => {
         if (isCancelled) {
           (doc as any).destroy?.().catch(() => {});
@@ -340,14 +362,16 @@ export default function App() {
         console.error("PDF loading error:", err);
         const detail = err?.message ? ` (${err.message})` : "";
         setDocError(
-          `Failed to open PDF document. The file might be corrupted or password-protected.${detail}`
+          `Gagal membuka dokumen PDF. File mungkin rusak atau terproteksi kata sandi.${detail}`
         );
         setIsDocLoading(false);
       });
 
     return () => {
       isCancelled = true;
-      loadTask.destroy().catch(() => {});
+      if (activeTask && typeof activeTask.destroy === "function") {
+        activeTask.destroy().catch(() => {});
+      }
     };
   }, [pdfData]);
 
@@ -359,19 +383,23 @@ export default function App() {
   }, [currentDocId, currentPage, zoom, bookmarks, pdfData]);
 
   // Central PDF buffer loader
-  const loadPdfBuffer = async (name: string, buffer: ArrayBuffer) => {
-    if (!buffer || buffer.byteLength === 0) return;
+  const loadPdfBuffer = async (name: string, rawBuffer: ArrayBuffer | Uint8Array | unknown) => {
+    const cleanBuffer = toCleanArrayBuffer(rawBuffer);
+    if (!cleanBuffer || cleanBuffer.byteLength === 0) {
+      setDocError("File PDF kosong atau gagal dibaca dari perangkat.");
+      return;
+    }
 
     const newId = "doc_" + Date.now();
     const newDoc: StoredDocument = {
       id: newId,
       name: name || "Document.pdf",
-      size: buffer.byteLength,
+      size: cleanBuffer.byteLength,
       totalPages: 1,
       lastPage: 1,
       lastZoom: 1.0,
       lastReadAt: Date.now(),
-      data: buffer.slice(0),
+      data: cleanBuffer.slice(0),
       bookmarks: [],
     };
 
@@ -388,7 +416,7 @@ export default function App() {
 
     setCurrentDocId(newDoc.id);
     setCurrentDocName(newDoc.name);
-    setPdfData(buffer.slice(0));
+    setPdfData(cleanBuffer.slice(0));
     setCurrentPage(1);
     setZoom(1.0);
     setBookmarks([]);
@@ -1118,6 +1146,8 @@ export default function App() {
           }}
           onAskAiAboutText={handleAskAiAboutText}
           onStopSpeaking={handleStopSpeaking}
+          onOpenOtherPdf={handleOpenPdf}
+          onLoadSamplePdf={loadSampleDocument}
         />
 
         {/* In-Document Search Panel */}

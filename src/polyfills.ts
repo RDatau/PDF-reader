@@ -132,4 +132,57 @@ if (typeof Promise !== "undefined" && typeof (Promise as any).withResolvers !== 
   });
 }
 
+if (typeof (Math as any).sumPrecise !== "function") {
+  Object.defineProperty(Math, "sumPrecise", {
+    value: function (items: Iterable<number>) {
+      let sum = 0;
+      for (const n of items) {
+        sum += Number(n);
+      }
+      return sum;
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+}
+
+if (typeof Uint8Array !== "undefined") {
+  if (typeof (Uint8Array as any).fromBase64 !== "function") {
+    Object.defineProperty(Uint8Array, "fromBase64", {
+      value: function (b64: string) {
+        const clean = String(b64).replace(/[\r\n\s]/g, "").replace(/-/g, "+").replace(/_/g, "/");
+        const bin = atob(clean);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) {
+          bytes[i] = bin.charCodeAt(i);
+        }
+        return bytes;
+      },
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
+  }
+
+  if (typeof (Uint8Array.prototype as any).toHex !== "function") {
+    Object.defineProperty(Uint8Array.prototype, "toHex", {
+      value: function (this: Uint8Array) {
+        let hex = "";
+        for (let i = 0; i < this.length; i++) {
+          hex += this[i].toString(16).padStart(2, "0");
+        }
+        return hex;
+      },
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
+  }
+}
+
+if (typeof globalThis !== "undefined") {
+  (globalThis as any).pdfjsVersion = "6.3.289";
+}
+
 export {};
