@@ -1,6 +1,8 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from "electron";
 import path from "path";
 import fs from "fs";
+import http from "http";
+import https from "https";
 
 let mainWindow: BrowserWindow | null = null;
 let fileToOpenOnStartup: string | null = null;
@@ -266,32 +268,112 @@ function createWindow() {
   const possibleIndexPaths = [
     path.join(__dirname, "../dist/index.html"),
     path.join(app.getAppPath(), "dist/index.html"),
+    ...(process.resourcesPath
+      ? [
+          path.join(process.resourcesPath, "app.asar", "dist/index.html"),
+          path.join(process.resourcesPath, "app", "dist/index.html"),
+        ]
+      : []),
     path.join(__dirname, "dist/index.html"),
     path.join(__dirname, "index.html"),
   ];
   const indexPath = possibleIndexPaths.find((p) => fs.existsSync(p)) || possibleIndexPaths[0];
   const devUrl = process.env.VITE_DEV_SERVER_URL || process.env.ELECTRON_START_URL;
+  let hasLoadedFallback = false;
+
+  const showDiagnosticPage = (title: string, detail: string) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const html = `<!doctype html>
+<html lang="id">
+<head><meta charset="utf-8"><title>${title}</title>
+<style>
+  body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #0F1115; color: #E2E8F0; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .card { max-width: 520px; padding: 28px; border-radius: 16px; background: #161B22; border: 1px solid #2D3748; box-shadow: 0 20px 50px rgba(0,0,0,.45); }
+  h1 { margin: 0 0 10px; font-size: 18px; color: #60A5FA; }
+  p { margin: 0 0 12px; font-size: 13px; line-height: 1.55; color: #CBD5E1; }
+  code { display: block; padding: 10px 12px; border-radius: 8px; background: #0B0E14; border: 1px solid #1E293B; color: #93C5FD; font-size: 12px; margin-top: 8px; white-space: pre-wrap; }
+</style></head>
+<body>
+  <div class="card">
+    <h1>${title}</h1>
+    <p>${detail}</p>
+    <code>npm run electron:dev</code>
+  </div>
+</body></html>`;
+    mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`).catch(() => {});
+  };
 
   // Handle load failure gracefully
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    if (errorCode === -3) return;
     console.warn(`[Electron] Gagal memuat URL: ${validatedURL} (${errorCode}: ${errorDescription})`);
-    
-    // If a dev server or URL failed, fallback immediately to local bundled index.html
-    if (fs.existsSync(indexPath) && !validatedURL.endsWith("index.html")) {
+
+    if (!hasLoadedFallback && fs.existsSync(indexPath) && !validatedURL.endsWith("index.html")) {
+      hasLoadedFallback = true;
       console.log("[Electron] Beralih memuat file bundle lokal:", indexPath);
-      mainWindow?.loadFile(indexPath);
+      mainWindow?.loadFile(indexPath).catch((err) => {
+        console.error("[Electron] Gagal memuat bundle lokal:", err);
+      });
       return;
+    }
+
+    if (!validatedURL.startsWith("data:")) {
+      showDiagnosticPage(
+        "Gagal Memuat VOXReader",
+        `Tidak dapat terhubung ke ${validatedURL || "halaman aplikasi"} (${errorDescription}). Jalankan perintah berikut untuk mode dev:`
+      );
     }
   });
 
   // Load strategy:
-  // In development with active dev server, load devUrl
-  // In production (installed .exe) or whenever packaged, load local bundled index.html
-  if (isDev && devUrl) {
-    mainWindow.loadURL(devUrl);
-  } else {
-    mainWindow.loadFile(indexPath);
-  }
+  // 1. Packaged .exe always loads local bundled dist/index.html.
+  // 2. Development mode: when devUrl is set, wait briefly for the dev server to be ready and load it;
+  //    otherwise fall back cleanly to local dist/index.html if present.
+  const loadTarget = async () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+
+    if (!isDev) {
+      await mainWindow.loadFile(indexPath).catch((err) => {
+        console.error("[Electron] Gagal memuat file produksi:", err);
+        showDiagnosticPage(
+          "Berkas Aplikasi Tidak Ditemukan",
+          "Pastikan aplikasi sudah di-build dengan benar sebelum dijalankan."
+        );
+      });
+      return;
+    }
+
+    if (devUrl) {
+      const ready = await waitForUrlReachable(devUrl, 8000);
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+
+      if (ready) {
+        try {
+          await mainWindow.loadURL(devUrl);
+          return;
+        } catch (err) {
+          console.warn("[Electron] loadURL gagal:", err);
+        }
+      } else {
+        console.warn(`[Electron] Server dev ${devUrl} belum aktif.`);
+      }
+    }
+
+    if (fs.existsSync(indexPath)) {
+      hasLoadedFallback = true;
+      console.log("[Electron] Memuat file bundle lokal:", indexPath);
+      await mainWindow.loadFile(indexPath).catch((err) => {
+        console.error("[Electron] Gagal memuat file lokal:", err);
+      });
+    } else {
+      showDiagnosticPage(
+        "Server Dev Belum Berjalan",
+        `Tidak dapat terhubung ke ${devUrl || "http://localhost:3000"} dan folder dist/ belum di-build. Jalankan perintah berikut:`
+      );
+    }
+  };
+
+  void loadTarget();
 
   mainWindow.webContents.on("did-finish-load", () => {
     if (fileToOpenOnStartup) {
@@ -307,6 +389,45 @@ function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+}
+
+function isUrlReachable(targetUrl: string, timeoutMs = 800): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      const parsed = new URL(targetUrl);
+      const client = parsed.protocol === "https:" ? https : http;
+      const req = client.get(
+        {
+          hostname: parsed.hostname,
+          port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+          path: "/",
+          timeout: timeoutMs,
+        },
+        (res) => {
+          res.resume();
+          resolve((res.statusCode || 500) < 500);
+        }
+      );
+      req.on("timeout", () => {
+        req.destroy();
+        resolve(false);
+      });
+      req.on("error", () => resolve(false));
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+async function waitForUrlReachable(targetUrl: string, maxWaitMs = 8000): Promise<boolean> {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    if (await isUrlReachable(targetUrl, 800)) {
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return false;
 }
 
 // App lifecycle

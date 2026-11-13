@@ -1127,14 +1127,36 @@ PANDUAN: Jika pengguna meminta Anda membacakan teks ("bacakan", "baca", "bacakan
     });
   });
 
+  // Return JSON 404 for unknown /api/* routes instead of falling through to SPA HTML
+  app.all("/api/*", (_req, res) => {
+    res.status(404).json({ error: "API endpoint not found" });
+  });
+
+  // Serve PDF.js CMaps directly (and return 404 if a CMap file doesn't exist so SPA never returns HTML)
+  const publicCmapsDir = path.join(process.cwd(), "public", "cmaps");
+  const nodeModulesCmapsDir = path.join(process.cwd(), "node_modules", "pdfjs-dist", "cmaps");
+  if (fs.existsSync(publicCmapsDir)) {
+    app.use("/cmaps", express.static(publicCmapsDir, { fallthrough: true }));
+  }
+  if (fs.existsSync(nodeModulesCmapsDir)) {
+    app.use("/cmaps", express.static(nodeModulesCmapsDir, { fallthrough: true }));
+  }
+  app.use("/cmaps", (_req, res) => {
+    res.status(404).end();
+  });
+
   // Vite middleware in dev or static serving in production
+  let viteServer: any = null;
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
+    viteServer = await createViteServer({
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === "true" ? false : { server },
+      },
       appType: "spa",
     });
-    app.use(vite.middlewares);
+    app.use(viteServer.middlewares);
   } else {
     const possibleDistPaths = [
       path.join(process.cwd(), "dist"),
@@ -1146,13 +1168,41 @@ PANDUAN: Jika pengguna meminta Anda membacakan teks ("bacakan", "baca", "bacakan
       possibleDistPaths.find((p) => fs.existsSync(path.join(p, "index.html"))) ||
       path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (_req, res) => {
+    app.get("*", (req, res) => {
+      if (/\.(mjs|js|css|wasm|bcmap|json|png|jpg|svg|ico|woff2?)$/i.test(req.path)) {
+        res.status(404).end();
+        return;
+      }
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
+  server.on("error", (err: any) => {
+    if (err?.code === "EADDRINUSE") {
+      console.error(`Port ${PORT} sudah digunakan. Tutup proses server lain pada port ${PORT} atau ubah PORT.`);
+    } else {
+      console.error("Server error:", err);
+    }
+    process.exit(1);
+  });
+
+  const gracefulShutdown = async () => {
+    try {
+      if (viteServer && typeof viteServer.close === "function") {
+        await viteServer.close();
+      }
+    } catch {
+      // ignore
+    }
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2000).unref();
+  };
+
+  process.on("SIGINT", gracefulShutdown);
+  process.on("SIGTERM", gracefulShutdown);
+
   server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
+    console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 

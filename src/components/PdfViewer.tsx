@@ -25,9 +25,14 @@ import {
   Square,
 } from "lucide-react";
 
-// Configure worker to local public path for 100% offline and Electron support
+// Configure worker to local public path for 100% offline, dev server, and Electron support
 try {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("pdf.worker.min.mjs", window.location.href).href;
+  const isHttpOrigin =
+    typeof window !== "undefined" &&
+    (window.location.protocol === "http:" || window.location.protocol === "https:");
+  pdfjsLib.GlobalWorkerOptions.workerSrc = isHttpOrigin
+    ? new URL("pdf.worker.min.mjs", `${window.location.origin}/`).href
+    : new URL("pdf.worker.min.mjs", window.location.href).href;
 } catch {
   pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.min.mjs";
 }

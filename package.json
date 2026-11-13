@@ -12,7 +12,7 @@
     "build": "node scripts/generate-icons.js && vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && npm run electron:compile",
     "electron:compile": "esbuild electron/main.ts --bundle --platform=node --format=cjs --packages=external --outfile=dist-electron/main.cjs && esbuild electron/preload.ts --bundle --platform=node --format=cjs --packages=external --outfile=dist-electron/preload.cjs",
     "electron:build": "npm run build && electron-builder --win nsis",
-    "electron:dev": "npm run electron:compile && cross-env ELECTRON_START_URL=http://localhost:3000 electron .",
+    "electron:dev": "npm run electron:compile && node scripts/electron-dev.mjs",
     "build:win": "npm run electron:build",
     "portable:win": "npm run build && electron-builder --win portable",
     "pack:win": "npm run build && electron-builder --win --dir",

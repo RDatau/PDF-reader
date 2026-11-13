@@ -10,7 +10,8 @@ export const WindowsTitlebar: React.FC<WindowsTitlebarProps> = ({
   currentDocName,
   isDark,
 }) => {
-  const isElectron = typeof window !== "undefined" && !!window.electronAPI?.isElectron;
+  const isElectron =
+    typeof window !== "undefined" && Boolean(window.electronAPI?.isElectron);
   const [isMaximized, setIsMaximized] = useState(false);
 
   useEffect(() => {
@@ -25,24 +26,21 @@ export const WindowsTitlebar: React.FC<WindowsTitlebarProps> = ({
     }
   }, [isElectron]);
 
+  // WebApp / PWA uses the browser's native window titlebar; render custom titlebar only in Electron
+  if (!isElectron) {
+    return null;
+  }
+
   const handleMinimize = () => {
-    if (isElectron && window.electronAPI) {
-      window.electronAPI.minimizeWindow();
-    }
+    window.electronAPI?.minimizeWindow();
   };
 
   const handleMaximize = () => {
-    if (isElectron && window.electronAPI) {
-      window.electronAPI.maximizeWindow();
-    } else {
-      setIsMaximized(!isMaximized);
-    }
+    window.electronAPI?.maximizeWindow();
   };
 
   const handleClose = () => {
-    if (isElectron && window.electronAPI) {
-      window.electronAPI.closeWindow();
-    }
+    window.electronAPI?.closeWindow();
   };
 
   const barBg = isDark ? "bg-[#0B0D11] text-gray-300 border-[#1B1F27]" : "bg-[#F3F4F6] text-gray-700 border-gray-200";

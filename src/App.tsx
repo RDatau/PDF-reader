@@ -29,9 +29,14 @@ import { normalizeGeminiTtsModel } from "./lib/geminiModels";
 import { streamGeminiTtsAudio } from "./lib/geminiApiBridge";
 import { X } from "lucide-react";
 
-// Configure worker to local public path for 100% offline and Electron support
+// Configure worker to local public path for 100% offline, dev server, and Electron support
 try {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("pdf.worker.min.mjs", window.location.href).href;
+  const isHttpOrigin =
+    typeof window !== "undefined" &&
+    (window.location.protocol === "http:" || window.location.protocol === "https:");
+  pdfjsLib.GlobalWorkerOptions.workerSrc = isHttpOrigin
+    ? new URL("pdf.worker.min.mjs", `${window.location.origin}/`).href
+    : new URL("pdf.worker.min.mjs", window.location.href).href;
 } catch {
   pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.min.mjs";
 }
@@ -213,14 +218,23 @@ export default function App() {
           const mostRecent = list[0];
           const fullDoc = await getDocumentById(mostRecent.id);
           if (isCancelled) return;
-          if (fullDoc && fullDoc.data && fullDoc.data.byteLength > 0) {
-            setCurrentDocId(fullDoc.id);
-            setCurrentDocName(fullDoc.name);
-            setPdfData(fullDoc.data.slice(0));
-            setCurrentPage(fullDoc.lastPage || 1);
-            setZoom(fullDoc.lastZoom || 1.0);
-            setBookmarks(fullDoc.bookmarks || []);
-            return;
+          if (fullDoc && fullDoc.data) {
+            const rawData: any = fullDoc.data;
+            const normalizedBuffer =
+              rawData instanceof ArrayBuffer
+                ? rawData.slice(0)
+                : ArrayBuffer.isView(rawData)
+                ? new Uint8Array(rawData.buffer, rawData.byteOffset, rawData.byteLength).slice().buffer
+                : null;
+            if (normalizedBuffer && normalizedBuffer.byteLength > 0) {
+              setCurrentDocId(fullDoc.id);
+              setCurrentDocName(fullDoc.name);
+              setPdfData(normalizedBuffer);
+              setCurrentPage(fullDoc.lastPage || 1);
+              setZoom(fullDoc.lastZoom || 1.0);
+              setBookmarks(fullDoc.bookmarks || []);
+              return;
+            }
           }
         }
 
@@ -292,10 +306,22 @@ export default function App() {
 
     // CRITICAL: Slicing the ArrayBuffer guarantees that PDF.js worker transfer
     // never detaches the original ArrayBuffer in state or storage!
+    let resolvedCMapUrl = "./cmaps/";
+    try {
+      const isHttpOrigin =
+        typeof window !== "undefined" &&
+        (window.location.protocol === "http:" || window.location.protocol === "https:");
+      resolvedCMapUrl = isHttpOrigin
+        ? new URL("cmaps/", `${window.location.origin}/`).href
+        : new URL("cmaps/", window.location.href).href;
+    } catch {
+      resolvedCMapUrl = "./cmaps/";
+    }
+
     const bufferCopy = pdfData.slice(0);
     const loadTask = pdfjsLib.getDocument({
       data: new Uint8Array(bufferCopy),
-      cMapUrl: "/cmaps/",
+      cMapUrl: resolvedCMapUrl,
       cMapPacked: true,
     });
 
@@ -312,7 +338,10 @@ export default function App() {
       .catch((err) => {
         if (isCancelled) return;
         console.error("PDF loading error:", err);
-        setDocError("Failed to open PDF document. The file might be corrupted or password-protected.");
+        const detail = err?.message ? ` (${err.message})` : "";
+        setDocError(
+          `Failed to open PDF document. The file might be corrupted or password-protected.${detail}`
+        );
         setIsDocLoading(false);
       });
 
