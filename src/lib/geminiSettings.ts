@@ -201,6 +201,51 @@ export function isApiKeyInCooldown(key: string): boolean {
   return true;
 }
 
+export function isAqExpressKey(key: string): boolean {
+  return typeof key === "string" && key.trim().startsWith("AQ.");
+}
+
+/**
+ * Returns all custom keys ordered starting from the round-robin cursor,
+ * placing healthy (non-cooled-down) keys first and cooled-down keys last,
+ * and advances the round-robin pointer for the next request.
+ */
+export function getOrderedRotatedKeys(rawOverride?: string): {
+  keys: string[];
+  startIndex: number;
+  total: number;
+} {
+  const allKeys = getCustomApiKeys(rawOverride);
+  if (allKeys.length === 0) {
+    return { keys: [], startIndex: -1, total: 0 };
+  }
+
+  const startIdx = getRotationIndex(allKeys.length);
+  const healthy: string[] = [];
+  const cooling: string[] = [];
+
+  for (let offset = 0; offset < allKeys.length; offset++) {
+    const idx = (startIdx + offset) % allKeys.length;
+    const candidate = allKeys[idx];
+    if (isApiKeyInCooldown(candidate)) {
+      cooling.push(candidate);
+    } else {
+      healthy.push(candidate);
+    }
+  }
+
+  const ordered = [...healthy, ...cooling];
+  const firstActualIdx = allKeys.indexOf(ordered[0]);
+  const chosenIdx = firstActualIdx >= 0 ? firstActualIdx : startIdx;
+  setRotationIndex((chosenIdx + 1) % allKeys.length);
+
+  return {
+    keys: ordered,
+    startIndex: chosenIdx,
+    total: allKeys.length,
+  };
+}
+
 /**
  * Returns the next available API key in round-robin rotation order,
  * skipping keys currently in cooldown when healthy keys exist, and advances the pointer.
@@ -210,27 +255,14 @@ export function getNextRotatedApiKey(rawOverride?: string): {
   index: number;
   total: number;
 } {
-  const keys = getCustomApiKeys(rawOverride);
+  const { keys, startIndex, total } = getOrderedRotatedKeys(rawOverride);
   if (keys.length === 0) {
     return { key: "", index: -1, total: 0 };
   }
-
-  const startIdx = getRotationIndex(keys.length);
-  let chosenIdx = startIdx;
-
-  for (let offset = 0; offset < keys.length; offset++) {
-    const candidateIdx = (startIdx + offset) % keys.length;
-    if (!isApiKeyInCooldown(keys[candidateIdx])) {
-      chosenIdx = candidateIdx;
-      break;
-    }
-  }
-
-  setRotationIndex((chosenIdx + 1) % keys.length);
   return {
-    key: keys[chosenIdx],
-    index: chosenIdx,
-    total: keys.length,
+    key: keys[0],
+    index: startIndex,
+    total,
   };
 }
 

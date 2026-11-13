@@ -1,21 +1,23 @@
 /**
  * Universal Gemini API Bridge for VOXReader.
  * Seamlessly handles:
- * 1. Web Preview / Production Web: proxies calls or connects to Gemini API with robust fallbacks.
- * 2. Windows Desktop Electron (.exe): makes direct REST requests to Google's official Gemini API
- *    using the user's configured API key, ensuring the desktop app works 100% standalone
- *    without needing an external local server process.
- * 3. Exponential backoff retry for rate limits / 429 errors (inspired by Lumina AI architecture).
- * 4. Preserves all currently configured Gemini models (gemini-3.6-flash, gemini-3.8-flash, gemini-3.1-flash-tts-preview, etc.).
+ * 1. Multi-key round-robin rotation & automatic failover across all user-configured keys
+ *    (supporting both standard AIzaSy... keys and AQ.... Express keys).
+ * 2. Web / PWA: sends the rotated key pool to Express /api/* backend so server-side rotation
+ *    also runs in one request, AND automatically falls back to direct @google/genai SDK calls
+ *    from the browser if /api/* returns 404 or is unreachable (e.g. static/PWA deployment).
+ * 3. Windows Desktop Electron (.exe): runs direct @google/genai SDK requests standalone.
  */
 
-import { sanitizeApiKey, getApiBaseUrl, parseApiKeys, maskApiKey } from "./apiConfig";
+import { GoogleGenAI, Modality } from "@google/genai";
+import { getApiBaseUrl, parseApiKeys, maskApiKey } from "./apiConfig";
 import {
   loadGeminiSettings,
   getCustomApiKeys,
-  getNextRotatedApiKey,
+  getOrderedRotatedKeys,
   markApiKeyCooldown,
   clearApiKeyCooldowns,
+  isAqExpressKey,
 } from "./geminiSettings";
 
 export function isDesktopApp(): boolean {
@@ -27,13 +29,52 @@ export function isDesktopApp(): boolean {
   );
 }
 
+// Track if the local/origin Express /api/* backend returned 404 (e.g. static PWA host)
+let webBackendUnavailable = false;
+
+function createSdkClient(apiKey: string, useVertex = false): GoogleGenAI {
+  if (useVertex) {
+    return new GoogleGenAI({
+      apiKey,
+      vertexai: true,
+    });
+  }
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      apiVersion: "v1beta",
+    },
+  });
+}
+
+async function runSdkWithAqFallback<T>(
+  apiKey: string,
+  runner: (ai: GoogleGenAI) => Promise<T>
+): Promise<T> {
+  try {
+    return await runner(createSdkClient(apiKey, false));
+  } catch (err: any) {
+    if (isAqExpressKey(apiKey) && isRotatableKeyError(err)) {
+      return await runner(createSdkClient(apiKey, true));
+    }
+    throw err;
+  }
+}
+
 function isRotatableKeyError(error: any): boolean {
+  if (!error) return false;
+  if (error?.name === "AbortError") return false;
   const msg = String(error?.message || error || "").toUpperCase();
   const status = error?.status || error?.code;
   return (
-    status === 429 ||
+    status === 400 ||
     status === 401 ||
     status === 403 ||
+    status === 404 ||
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
     msg.includes("429") ||
     msg.includes("RESOURCE_EXHAUSTED") ||
     msg.includes("QUOTA") ||
@@ -41,46 +82,60 @@ function isRotatableKeyError(error: any): boolean {
     msg.includes("API KEY NOT VALID") ||
     msg.includes("INVALID_KEY") ||
     msg.includes("PERMISSION_DENIED") ||
-    msg.includes("403")
+    msg.includes("NOT_FOUND") ||
+    msg.includes("400") ||
+    msg.includes("401") ||
+    msg.includes("403") ||
+    msg.includes("404") ||
+    msg.includes("500") ||
+    msg.includes("502") ||
+    msg.includes("503")
   );
+}
+
+function isBackendUnavailableStatus(status?: number): boolean {
+  return status === 404 || status === 502 || status === 503 || status === 504;
 }
 
 /**
  * Executes an operation with round-robin API key selection and automatic
- * failover across all configured keys when a key hits 429/quota or auth errors.
+ * failover across all configured keys when a key hits quota, auth, or endpoint errors.
  */
 async function withApiKeyRotation<T>(
-  operation: (apiKey: string, keyIndex: number, totalKeys: number) => Promise<T>,
+  operation: (
+    apiKey: string,
+    allOrderedKeys: string[],
+    keyIndex: number,
+    totalKeys: number
+  ) => Promise<T>,
   shouldAbortFailover?: () => boolean
 ): Promise<T> {
-  const keys = getCustomApiKeys();
+  const { keys } = getOrderedRotatedKeys();
   if (keys.length === 0) {
-    return await operation("", -1, 0);
-  }
-
-  const first = getNextRotatedApiKey();
-  const orderedIndices: number[] = [];
-  for (let offset = 0; offset < keys.length; offset++) {
-    orderedIndices.push((first.index + offset) % keys.length);
+    return await operation("", [], -1, 0);
   }
 
   let lastError: any;
-  for (let attempt = 0; attempt < orderedIndices.length; attempt++) {
-    const idx = orderedIndices[attempt];
-    const currentKey = keys[idx];
+  for (let i = 0; i < keys.length; i++) {
+    const currentKey = keys[i];
     try {
-      return await operation(currentKey, idx, keys.length);
+      return await operation(currentKey, keys, i, keys.length);
     } catch (error: any) {
       lastError = error;
-      if (shouldAbortFailover?.()) {
+      if (error?.name === "AbortError" || shouldAbortFailover?.()) {
         throw error;
       }
-      if (isRotatableKeyError(error) && attempt < orderedIndices.length - 1) {
+      if (isRotatableKeyError(error) && i < keys.length - 1) {
         const msg = String(error?.message || "").toUpperCase();
-        const isQuota = msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED") || msg.includes("QUOTA");
+        const isQuota =
+          msg.includes("429") ||
+          msg.includes("RESOURCE_EXHAUSTED") ||
+          msg.includes("QUOTA");
         markApiKeyCooldown(currentKey, isQuota ? 60_000 : 120_000);
         console.warn(
-          `[GeminiBridge] Key #${idx + 1} (${maskApiKey(currentKey)}) bermasalah/limit. Merotasi ke Key berikutnya...`
+          `[GeminiBridge] Key #${i + 1} (${maskApiKey(currentKey)}) gagal (${String(
+            error?.message || error
+          ).slice(0, 80)}). Merotasi ke Key #${i + 2}/${keys.length}...`
         );
         continue;
       }
@@ -91,7 +146,7 @@ async function withApiKeyRotation<T>(
 }
 
 /**
- * Retry helper with exponential backoff for handling intermittent rate limits (429) and network glitches.
+ * Retry helper with exponential backoff for single-key rate limit resilience.
  */
 export async function retryOperation<T>(
   operation: () => Promise<T>,
@@ -103,6 +158,7 @@ export async function retryOperation<T>(
       return await operation();
     } catch (error: any) {
       lastError = error;
+      if (error?.name === "AbortError") throw error;
       const errorMsg = error?.message || String(error);
       const isQuotaError =
         errorMsg.includes("429") ||
@@ -110,8 +166,7 @@ export async function retryOperation<T>(
         error?.status === 429;
 
       if (isQuotaError && attempt < maxRetries) {
-        const delayMs = Math.pow(2, attempt + 1) * 1000; // 2s, 4s
-        console.warn(`[GeminiBridge] Kuota/RPM tersenggol (429). Mencoba lagi dalam ${delayMs / 1000}s... (Percobaan ${attempt + 1}/${maxRetries})`);
+        const delayMs = Math.pow(2, attempt + 1) * 1000;
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         continue;
       }
@@ -128,104 +183,59 @@ export interface ApiKeyCheckItem {
   message: string;
 }
 
-async function verifySingleKey(
+async function verifySingleKeyDirect(
   cleanKey: string,
   activeModel: string
 ): Promise<{ ok: boolean; message: string; reply?: string }> {
-  const fallbackModel = activeModel === "gemini-3.8-flash" ? "gemini-3.6-flash" : "gemini-3.8-flash";
+  const fallbackModel =
+    activeModel === "gemini-3.8-flash" ? "gemini-3.6-flash" : "gemini-3.8-flash";
   const modelsToTry = [activeModel, fallbackModel];
+  let lastErr: any;
 
-  for (const model of modelsToTry) {
-    try {
-      const result = await retryOperation(async () => {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
-          cleanKey
-        )}`;
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: "Ping. Balas 'OK'." }] }],
-            generationConfig: { maxOutputTokens: 10 },
-          }),
+  for (const useVertex of isAqExpressKey(cleanKey) ? [false, true] : [false]) {
+    const ai = createSdkClient(cleanKey, useVertex);
+    for (const model of modelsToTry) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: "Ping. Balas 'OK'.",
+          config: { maxOutputTokens: 10 },
         });
-
-        const data = await res.json();
-        if (res.ok && data.candidates?.[0]?.content?.parts?.[0]?.text) {
+        const reply = response.text?.trim();
+        if (reply) {
           return {
             ok: true,
-            message: `Valid (${model})`,
-            reply: data.candidates[0].content.parts[0].text.trim(),
+            message: useVertex ? `Valid (${model} Vertex)` : `Valid (${model})`,
+            reply,
           };
         }
-
-        if (data.error) {
-          const errMsg = data.error.message || "";
-          if (errMsg.includes("API_KEY_INVALID") || res.status === 400) {
-            throw new Error("INVALID_KEY");
-          }
-          if (errMsg.includes("RESOURCE_EXHAUSTED") || res.status === 429) {
-            throw new Error("QUOTA_EXHAUSTED");
-          }
-          if (errMsg.includes("PERMISSION_DENIED") || res.status === 403) {
-            throw new Error("PERMISSION_DENIED");
-          }
-          throw new Error(errMsg);
-        }
-
-        throw new Error("NO_RESPONSE");
-      }, 0);
-
-      if (result.ok) return result;
-    } catch (err: any) {
-      if (err.message === "INVALID_KEY") {
-        return {
-          ok: false,
-          message: "API Key tidak valid. Pastikan kunci disalin lengkap (dimulai dengan AIzaSy...).",
-        };
+      } catch (err: any) {
+        lastErr = err;
       }
-      if (err.message === "QUOTA_EXHAUSTED") {
-        return {
-          ok: false,
-          message: "Kuota/Rate Limit tercapai (429).",
-        };
-      }
-      if (err.message === "PERMISSION_DENIED") {
-        return {
-          ok: false,
-          message: "Akses ditolak (403). Periksa izin Generative Language API.",
-        };
-      }
-      console.warn(`[verifyApiKey] Model ${model} check error:`, err);
     }
   }
 
-  // Fallback to backend server check on web preview
-  if (!isDesktopApp()) {
-    try {
-      const baseUrl = getApiBaseUrl();
-      const res = await fetch(`${baseUrl}/api/gemini/check`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-gemini-api-key": cleanKey,
-        },
-        body: JSON.stringify({ apiKey: cleanKey }),
-      });
-      return await res.json();
-    } catch {
-      // ignore
-    }
+  const errMsg = String(lastErr?.message || lastErr || "");
+  if (errMsg.includes("API_KEY_INVALID") || errMsg.includes("API key not valid")) {
+    return {
+      ok: false,
+      message: "API Key tidak valid. Pastikan kunci disalin lengkap.",
+    };
   }
-
+  if (errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("429")) {
+    return { ok: false, message: "Kuota/Rate Limit tercapai (429)." };
+  }
+  if (errMsg.includes("PERMISSION_DENIED") || errMsg.includes("403")) {
+    return { ok: false, message: "Akses ditolak (403). Periksa izin API." };
+  }
   return {
     ok: false,
-    message: "Gagal menghubungkan API Key ke Google AI Studio.",
+    message: errMsg ? `Gagal (${errMsg.slice(0, 90)})` : "Gagal menghubungkan API Key.",
   };
 }
 
 /**
- * Verifies one or multiple newline-separated API Keys using the current text model.
+ * Verifies one or multiple newline-separated API Keys using @google/genai (and server fallback if available).
  */
 export async function verifyApiKey(
   key?: string
@@ -238,12 +248,12 @@ export async function verifyApiKey(
   const settings = loadGeminiSettings();
   const rawKey = key ?? settings.apiKey;
   const keys = parseApiKeys(rawKey);
-  const cleanKey = sanitizeApiKey(rawKey);
 
   if (keys.length === 0 && isDesktopApp()) {
     return {
       ok: false,
-      message: "API Key belum diisi. Silakan tempel satu atau lebih API Key Anda dari Google AI Studio.",
+      message:
+        "API Key belum diisi. Silakan tempel satu atau lebih API Key Anda dari Google AI Studio.",
     };
   }
 
@@ -266,7 +276,7 @@ export async function verifyApiKey(
   clearApiKeyCooldowns();
 
   if (keys.length === 1) {
-    const singleRes = await verifySingleKey(cleanKey, activeModel);
+    const singleRes = await verifySingleKeyDirect(keys[0], activeModel);
     return {
       ok: singleRes.ok,
       reply: singleRes.reply,
@@ -276,7 +286,7 @@ export async function verifyApiKey(
       results: [
         {
           index: 0,
-          maskedKey: maskApiKey(cleanKey),
+          maskedKey: maskApiKey(keys[0]),
           ok: singleRes.ok,
           message: singleRes.message,
         },
@@ -284,11 +294,10 @@ export async function verifyApiKey(
     };
   }
 
-  // Multi-key batch verification
   const results: ApiKeyCheckItem[] = [];
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i];
-    const r = await verifySingleKey(k, activeModel);
+    const r = await verifySingleKeyDirect(k, activeModel);
     if (!r.ok) {
       markApiKeyCooldown(k, 60_000);
     }
@@ -323,7 +332,7 @@ export async function verifyApiKey(
 }
 
 /**
- * Ask a question about the document with auto-retry and desktop direct API support
+ * Ask a question about the document with multi-key rotation and seamless browser/desktop SDK fallback.
  */
 export async function askGeminiDocument(params: {
   question: string;
@@ -337,78 +346,65 @@ export async function askGeminiDocument(params: {
   const settings = loadGeminiSettings();
   const selectedModel = params.model || settings.textModel || "gemini-3.6-flash";
 
-  return await withApiKeyRotation(async (apiKey) => {
-    return await retryOperation(async () => {
-      if (isDesktopApp()) {
-        if (!apiKey) {
-          throw new Error(
-            "API Key belum diisi. Silakan buka Pengaturan Gemini AI (ikon gerigi) dan masukkan API Key Anda untuk menggunakan asisten AI."
-          );
-        }
+  const askDirectSdk = async (apiKey: string) => {
+    if (!apiKey) {
+      throw new Error(
+        "API Key belum diisi. Silakan buka Pengaturan Gemini AI dan masukkan API Key Anda."
+      );
+    }
 
-        const systemPrompt =
-          params.personality ||
-          `Anda adalah VOXReader AI Assistant, asisten pembaca dokumen PDF yang cerdas, ramah, dan solutif.
+    const systemPrompt =
+      params.personality ||
+      `Anda adalah VOXReader AI Assistant, asisten pembaca dokumen PDF yang cerdas, ramah, dan solutif.
 Jawab pertanyaan pengguna secara akurat, terstruktur, dan berbasis pada konteks dokumen yang disediakan.
 Dokumen: "${params.docTitle || "Dokumen"}" (Halaman ${params.pageNumber || 1}).
 Gunakan format Markdown jika memudahkan pembacaan.`;
 
-        const contextPrefix = params.pageText
-          ? `[KONTEKS HALAMAN ${params.pageNumber || 1}]:\n"""${params.pageText.slice(0, 10000)}"""\n\n`
-          : "";
+    const contextPrefix = params.pageText
+      ? `[KONTEKS HALAMAN ${params.pageNumber || 1}]:\n"""${params.pageText.slice(0, 10000)}"""\n\n`
+      : "";
+    const fullUserPrompt = `${contextPrefix}Pertanyaan Pengguna: ${params.question}`;
 
-        const fullUserPrompt = `${contextPrefix}Pertanyaan Pengguna: ${params.question}`;
+    const contents = [
+      ...params.history.map((h) => ({
+        role: h.role === "assistant" ? "model" : "user",
+        parts: [{ text: h.content }],
+      })),
+      {
+        role: "user",
+        parts: [{ text: fullUserPrompt }],
+      },
+    ];
 
-        const contents = [
-          ...params.history.map((h) => ({
-            role: h.role === "assistant" ? "model" : "user",
-            parts: [{ text: h.content }],
-          })),
-          {
-            role: "user",
-            parts: [{ text: fullUserPrompt }],
-          },
-        ];
+    const response = await runSdkWithAqFallback(apiKey, (ai) =>
+      ai.models.generateContent({
+        model: selectedModel,
+        contents,
+        config: {
+          systemInstruction: systemPrompt,
+          temperature: 0.4,
+          maxOutputTokens: 2048,
+        },
+      })
+    );
 
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${encodeURIComponent(
-          apiKey
-        )}`;
+    const answer = response.text?.trim();
+    if (!answer) {
+      throw new Error("Tidak ada jawaban yang dihasilkan oleh model AI.");
+    }
+    return { answer, model: selectedModel };
+  };
 
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: systemPrompt }] },
-            contents,
-            generationConfig: {
-              temperature: 0.4,
-              maxOutputTokens: 2048,
-            },
-          }),
-        });
+  return await withApiKeyRotation(async (apiKey, allOrderedKeys) => {
+    if (isDesktopApp() || (webBackendUnavailable && apiKey)) {
+      return await askDirectSdk(apiKey);
+    }
 
-        const data = await res.json();
-        if (!res.ok || data.error) {
-          const msg = data.error?.message || "Gagal mendapatkan respon dari Gemini AI";
-          if (res.status === 429) {
-            throw new Error("429 RESOURCE_EXHAUSTED: Kuota permintaan Gemini AI tercapai.");
-          }
-          throw new Error(msg);
-        }
+    const baseUrl = getApiBaseUrl();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (apiKey) headers["x-gemini-api-key"] = apiKey;
 
-        const answer = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!answer) {
-          throw new Error("Tidak ada jawaban yang dihasilkan oleh model AI.");
-        }
-
-        return { answer: answer.trim(), model: selectedModel };
-      }
-
-      // Web environment: call server with rotated key
-      const baseUrl = getApiBaseUrl();
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (apiKey) headers["x-gemini-api-key"] = apiKey;
-
+    try {
       const res = await fetch(`${baseUrl}/api/ai/ask`, {
         method: "POST",
         headers,
@@ -421,23 +417,34 @@ Gunakan format Markdown jika memudahkan pembacaan.`;
           model: selectedModel,
           personality: params.personality,
           apiKey: apiKey || undefined,
+          apiKeys: allOrderedKeys.length > 0 ? allOrderedKeys : undefined,
         }),
       });
 
-      const data = await res.json();
+      if (isBackendUnavailableStatus(res.status) && apiKey) {
+        webBackendUnavailable = true;
+        return await askDirectSdk(apiKey);
+      }
+
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        if (res.status === 429) {
-          throw new Error("429: Kuota tercapai.");
-        }
-        throw new Error(data.error || "Gagal bertanya ke AI.");
+        const err: any = new Error(data.error || `Gagal bertanya ke AI (${res.status}).`);
+        err.status = res.status;
+        throw err;
       }
       return data;
-    }, getCustomApiKeys().length > 1 ? 0 : 2);
+    } catch (err: any) {
+      if (apiKey && (err?.name === "TypeError" || isBackendUnavailableStatus(err?.status))) {
+        webBackendUnavailable = true;
+        return await askDirectSdk(apiKey);
+      }
+      throw err;
+    }
   });
 }
 
 /**
- * Summarize current page with auto-retry and desktop direct API support
+ * Summarize current page with multi-key rotation and seamless browser/desktop SDK fallback.
  */
 export async function summarizeDocumentPage(params: {
   pageText: string;
@@ -449,18 +456,16 @@ export async function summarizeDocumentPage(params: {
   const settings = loadGeminiSettings();
   const selectedModel = params.model || settings.textModel || "gemini-3.6-flash";
 
-  return await withApiKeyRotation(async (apiKey) => {
-    return await retryOperation(async () => {
-      if (isDesktopApp()) {
-        if (!apiKey) {
-          throw new Error(
-            "API Key belum diisi. Silakan masukkan API Key di Pengaturan Gemini AI untuk merangkum halaman."
-          );
-        }
+  const summarizeDirectSdk = async (apiKey: string) => {
+    if (!apiKey) {
+      throw new Error(
+        "API Key belum diisi. Silakan masukkan API Key di Pengaturan Gemini AI untuk merangkum halaman."
+      );
+    }
 
-        const prompt = `Anda adalah asisten dokumen PDF. Buatlah rangkuman ringkas, terstruktur, dan mudah dipahami dari isi halaman ${
-          params.pageNumber || 1
-        } dokumen "${params.docTitle || "Dokumen"}".
+    const prompt = `Anda adalah asisten dokumen PDF. Buatlah rangkuman ringkas, terstruktur, dan mudah dipahami dari isi halaman ${
+      params.pageNumber || 1
+    } dokumen "${params.docTitle || "Dokumen"}".
 Sertakan poin-poin penting dan kesimpulan utama.
 
 Teks Halaman:
@@ -468,41 +473,32 @@ Teks Halaman:
 ${params.pageText.slice(0, 10000)}
 """`;
 
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${encodeURIComponent(
-          apiKey
-        )}`;
+    const response = await runSdkWithAqFallback(apiKey, (ai) =>
+      ai.models.generateContent({
+        model: selectedModel,
+        contents: prompt,
+        config: {
+          temperature: 0.3,
+          maxOutputTokens: 1024,
+        },
+      })
+    );
 
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.3,
-              maxOutputTokens: 1024,
-            },
-          }),
-        });
+    const summary = response.text?.trim();
+    if (!summary) throw new Error("Gagal membuat rangkuman halaman.");
+    return { summary, model: selectedModel };
+  };
 
-        const data = await res.json();
-        if (!res.ok || data.error) {
-          if (res.status === 429) {
-            throw new Error("429: Kuota ringkasan tercapai.");
-          }
-          throw new Error(data.error?.message || "Gagal membuat rangkuman");
-        }
+  return await withApiKeyRotation(async (apiKey, allOrderedKeys) => {
+    if (isDesktopApp() || (webBackendUnavailable && apiKey)) {
+      return await summarizeDirectSdk(apiKey);
+    }
 
-        const summary = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!summary) throw new Error("Gagal membuat rangkuman halaman.");
+    const baseUrl = getApiBaseUrl();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (apiKey) headers["x-gemini-api-key"] = apiKey;
 
-        return { summary: summary.trim(), model: selectedModel };
-      }
-
-      // Web environment: call server with rotated key
-      const baseUrl = getApiBaseUrl();
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (apiKey) headers["x-gemini-api-key"] = apiKey;
-
+    try {
       const res = await fetch(`${baseUrl}/api/ai/summary`, {
         method: "POST",
         headers,
@@ -513,18 +509,29 @@ ${params.pageText.slice(0, 10000)}
           model: selectedModel,
           personality: params.personality,
           apiKey: apiKey || undefined,
+          apiKeys: allOrderedKeys.length > 0 ? allOrderedKeys : undefined,
         }),
       });
 
-      const data = await res.json();
+      if (isBackendUnavailableStatus(res.status) && apiKey) {
+        webBackendUnavailable = true;
+        return await summarizeDirectSdk(apiKey);
+      }
+
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        if (res.status === 429) {
-          throw new Error("429: Kuota ringkasan tercapai.");
-        }
-        throw new Error(data.error || "Gagal membuat rangkuman.");
+        const err: any = new Error(data.error || `Gagal membuat rangkuman (${res.status}).`);
+        err.status = res.status;
+        throw err;
       }
       return data;
-    }, getCustomApiKeys().length > 1 ? 0 : 2);
+    } catch (err: any) {
+      if (apiKey && (err?.name === "TypeError" || isBackendUnavailableStatus(err?.status))) {
+        webBackendUnavailable = true;
+        return await summarizeDirectSdk(apiKey);
+      }
+      throw err;
+    }
   });
 }
 
@@ -578,7 +585,8 @@ function normalizeTtsModelId(model?: string): "gemini-3.8-flash-lite-tts" | "gem
 
 /**
  * Stream Gemini 3.8 TTS Audio incrementally (raw PCM chunks, 24kHz mono 16-bit LE).
- * Plays audio immediately as chunks arrive — does NOT wait for full generation.
+ * Automatically rotates across all configured API keys AND switches seamlessly to direct
+ * @google/genai browser streaming if /api/tts/stream returns 404 or is unreachable.
  */
 export async function streamGeminiTtsAudio(params: {
   text: string;
@@ -592,8 +600,10 @@ export async function streamGeminiTtsAudio(params: {
   const settings = loadGeminiSettings();
   const voice = params.voice || settings.voice || "Fola";
   const model = normalizeTtsModelId(params.model || settings.ttsModel);
-  const rawStyle = params.styleInstruction !== undefined ? params.styleInstruction : settings.styleInstruction;
-  const cleanStyle = typeof rawStyle === "string" && rawStyle.trim().length > 0 ? rawStyle.trim() : undefined;
+  const rawStyle =
+    params.styleInstruction !== undefined ? params.styleInstruction : settings.styleInstruction;
+  const cleanStyle =
+    typeof rawStyle === "string" && rawStyle.trim().length > 0 ? rawStyle.trim() : undefined;
 
   let emittedChunks = 0;
 
@@ -602,109 +612,89 @@ export async function streamGeminiTtsAudio(params: {
     textPart.speechMetadata = { style: cleanStyle };
   }
 
-  const streamDesktopDirect = async (apiKey: string) => {
+  const streamDirectSdk = async (apiKey: string) => {
     if (!apiKey) {
-      throw new Error("API Key diperlukan untuk Gemini 3.8 TTS pada aplikasi desktop.");
+      throw new Error(
+        "API Key diperlukan untuk Gemini 3.8 TTS. Silakan masukkan API Key di Pengaturan Gemini."
+      );
     }
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(
-      apiKey
-    )}`;
-
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: params.signal,
-      body: JSON.stringify({
+    const responseStream = await runSdkWithAqFallback(apiKey, (ai) =>
+      ai.models.generateContentStream({
+        model,
         contents: [{ role: "user", parts: [textPart] }],
-        generationConfig: {
-          responseModalities: ["AUDIO"],
+        config: {
+          responseModalities: [Modality.AUDIO],
           speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: { voiceName: voice },
             },
           },
+          abortSignal: params.signal,
         },
-      }),
-    });
+      })
+    );
 
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => ({}));
-      if (res.status === 429) {
-        throw new Error("429 RESOURCE_EXHAUSTED: Kuota Gemini TTS tercapai.");
-      }
-      throw new Error(errJson?.error?.message || `Permintaan Gemini Stream TTS gagal (${res.status}).`);
-    }
-
-    if (!res.body) {
-      throw new Error("Stream body tidak tersedia dari Google AI API.");
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? "";
-
-      for (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line.startsWith("data:")) continue;
-        const jsonStr = line.slice(5).trim();
-        if (!jsonStr || jsonStr === "[DONE]") continue;
-
-        let parsed: any;
-        try {
-          parsed = JSON.parse(jsonStr);
-        } catch {
-          continue;
-        }
-
-        if (parsed.error) {
-          throw new Error(parsed.error.message || "Error pada stream Gemini TTS");
-        }
-
-        const parts = parsed.candidates?.[0]?.content?.parts || [];
-        for (const part of parts) {
-          const data = part?.inlineData?.data;
-          if (data) {
-            emittedChunks++;
-            params.onChunk(data, 24000);
-          }
+    for await (const chunk of responseStream) {
+      if (params.signal?.aborted) break;
+      const parts = chunk.candidates?.[0]?.content?.parts || [];
+      for (const part of parts) {
+        const data = (part as any)?.inlineData?.data;
+        if (data) {
+          emittedChunks++;
+          params.onChunk(data, 24000);
         }
       }
     }
   };
 
-  const streamWebBackend = async (apiKey: string) => {
+  const streamWebBackend = async (apiKey: string, allOrderedKeys: string[]) => {
     const baseUrl = getApiBaseUrl();
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (apiKey) headers["x-gemini-api-key"] = apiKey;
 
-    const res = await fetch(`${baseUrl}/api/tts/stream`, {
-      method: "POST",
-      headers,
-      signal: params.signal,
-      body: JSON.stringify({
-        text: params.text,
-        voice,
-        model,
-        styleInstruction: cleanStyle,
-        apiKey: apiKey || undefined,
-      }),
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${baseUrl}/api/tts/stream`, {
+        method: "POST",
+        headers,
+        signal: params.signal,
+        body: JSON.stringify({
+          text: params.text,
+          voice,
+          model,
+          styleInstruction: cleanStyle,
+          apiKey: apiKey || undefined,
+          apiKeys: allOrderedKeys.length > 0 ? allOrderedKeys : undefined,
+        }),
+      });
+    } catch (fetchErr: any) {
+      if (fetchErr?.name === "AbortError") throw fetchErr;
+      if (apiKey) {
+        webBackendUnavailable = true;
+        console.warn("[GeminiBridge] /api/tts/stream unreachable, switching to direct @google/genai...");
+        await streamDirectSdk(apiKey);
+        return;
+      }
+      throw fetchErr;
+    }
+
+    if (isBackendUnavailableStatus(res.status) && apiKey) {
+      webBackendUnavailable = true;
+      console.warn(
+        `[GeminiBridge] /api/tts/stream returned ${res.status}, switching to direct @google/genai...`
+      );
+      await streamDirectSdk(apiKey);
+      return;
+    }
 
     if (!res.ok) {
-      if (res.status === 429) {
-        throw new Error("429 RESOURCE_EXHAUSTED: Kuota Gemini TTS tercapai.");
-      }
       const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.error || `Gagal memulai stream Gemini TTS (${res.status})`);
+      const err: any = new Error(
+        errData.error || `Gagal memulai stream Gemini TTS (${res.status})`
+      );
+      err.status = res.status;
+      throw err;
     }
 
     if (!res.body) {
@@ -741,23 +731,22 @@ export async function streamGeminiTtsAudio(params: {
           params.onChunk(evt.data, evt.sampleRate || 24000);
         } else if (evt.type === "error") {
           const prefix = evt.quotaExceeded ? "429 RESOURCE_EXHAUSTED: " : "";
-          throw new Error(`${prefix}${evt.error || "Stream TTS gagal."}`);
+          const err: any = new Error(`${prefix}${evt.error || "Stream TTS gagal."}`);
+          if (evt.quotaExceeded) err.status = 429;
+          throw err;
         }
       }
     }
   };
 
-  // Rotate API keys automatically if a key fails BEFORE any chunk has been emitted
   await withApiKeyRotation(
-    async (apiKey) => {
-      await retryOperation(async () => {
-        if (emittedChunks > 0) return;
-        if (isDesktopApp()) {
-          await streamDesktopDirect(apiKey);
-        } else {
-          await streamWebBackend(apiKey);
-        }
-      }, getCustomApiKeys().length > 1 ? 0 : 1);
+    async (apiKey, allOrderedKeys) => {
+      if (emittedChunks > 0 || params.signal?.aborted) return;
+      if (isDesktopApp() || (webBackendUnavailable && apiKey)) {
+        await streamDirectSdk(apiKey);
+      } else {
+        await streamWebBackend(apiKey, allOrderedKeys);
+      }
     },
     () => emittedChunks > 0 || !!params.signal?.aborted
   );
@@ -771,7 +760,7 @@ export async function streamGeminiTtsAudio(params: {
 }
 
 /**
- * Fetch Gemini Flash TTS Audio (Unary fallback)
+ * Fetch Gemini Flash TTS Audio (Unary compatibility)
  */
 export async function fetchGeminiTtsAudio(params: {
   text: string;
@@ -782,91 +771,83 @@ export async function fetchGeminiTtsAudio(params: {
   const settings = loadGeminiSettings();
   const voice = params.voice || settings.voice || "Fola";
   const model = normalizeTtsModelId(params.model || settings.ttsModel);
-  const rawStyle = params.styleInstruction !== undefined ? params.styleInstruction : settings.styleInstruction;
-  const cleanStyle = typeof rawStyle === "string" && rawStyle.trim().length > 0 ? rawStyle.trim() : undefined;
+  const rawStyle =
+    params.styleInstruction !== undefined ? params.styleInstruction : settings.styleInstruction;
+  const cleanStyle =
+    typeof rawStyle === "string" && rawStyle.trim().length > 0 ? rawStyle.trim() : undefined;
 
   const textPart: Record<string, any> = { text: params.text };
   if (cleanStyle) {
     textPart.speechMetadata = { style: cleanStyle };
   }
 
-  return await withApiKeyRotation(async (apiKey) => {
-    return await retryOperation(async () => {
-      if (isDesktopApp()) {
-        if (!apiKey) {
-          throw new Error("API Key diperlukan untuk Gemini 3.8 TTS pada aplikasi desktop.");
-        }
+  const fetchDirectSdk = async (apiKey: string) => {
+    if (!apiKey) {
+      throw new Error("API Key diperlukan untuk Gemini 3.8 TTS.");
+    }
 
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
-          apiKey
-        )}`;
-
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ role: "user", parts: [textPart] }],
-            generationConfig: {
-              responseModalities: ["AUDIO"],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: { voiceName: voice },
-                },
-              },
+    const response = await runSdkWithAqFallback(apiKey, (ai) =>
+      ai.models.generateContent({
+        model,
+        contents: [{ role: "user", parts: [textPart] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: voice },
             },
-          }),
-        });
+          },
+        },
+      })
+    );
 
-        const data = await res.json();
-        if (!res.ok || data.error) {
-          if (res.status === 429) {
-            throw new Error("429: Kuota TTS tercapai.");
-          }
-          throw new Error(data.error?.message || "Permintaan Gemini TTS gagal.");
-        }
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (!base64Audio) {
+      throw new Error("Tidak ada audio yang dikembalikan dari model Gemini TTS.");
+    }
 
-        const base64Audio = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (!base64Audio) {
-          throw new Error("Tidak ada audio yang dikembalikan dari model Gemini TTS.");
-        }
+    const binaryString = atob(base64Audio);
+    const rawBytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      rawBytes[i] = binaryString.charCodeAt(i);
+    }
 
-        const binaryString = atob(base64Audio);
-        const rawBytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          rawBytes[i] = binaryString.charCodeAt(i);
-        }
+    const isAlreadyWav =
+      rawBytes.length > 44 &&
+      rawBytes[0] === 0x52 &&
+      rawBytes[1] === 0x49 &&
+      rawBytes[2] === 0x46 &&
+      rawBytes[3] === 0x46;
 
-        const isAlreadyWav =
-          rawBytes.length > 44 &&
-          rawBytes[0] === 0x52 &&
-          rawBytes[1] === 0x49 &&
-          rawBytes[2] === 0x46 &&
-          rawBytes[3] === 0x46;
-
-        let wavBase64 = base64Audio;
-        if (!isAlreadyWav) {
-          const wavBuffer = pcmToWav(rawBytes, 24000, 1, 16);
-          const wavBytes = new Uint8Array(wavBuffer);
-          let binaryWav = "";
-          for (let i = 0; i < wavBytes.byteLength; i++) {
-            binaryWav += String.fromCharCode(wavBytes[i]);
-          }
-          wavBase64 = btoa(binaryWav);
-        }
-
-        return {
-          audio: wavBase64,
-          mimeType: "audio/wav",
-          voice,
-          model,
-        };
+    let wavBase64 = base64Audio;
+    if (!isAlreadyWav) {
+      const wavBuffer = pcmToWav(rawBytes, 24000, 1, 16);
+      const wavBytes = new Uint8Array(wavBuffer);
+      let binaryWav = "";
+      for (let i = 0; i < wavBytes.byteLength; i++) {
+        binaryWav += String.fromCharCode(wavBytes[i]);
       }
+      wavBase64 = btoa(binaryWav);
+    }
 
-      // Web environment: call server with rotated key
-      const baseUrl = getApiBaseUrl();
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (apiKey) headers["x-gemini-api-key"] = apiKey;
+    return {
+      audio: wavBase64,
+      mimeType: "audio/wav",
+      voice,
+      model,
+    };
+  };
 
+  return await withApiKeyRotation(async (apiKey, allOrderedKeys) => {
+    if (isDesktopApp() || (webBackendUnavailable && apiKey)) {
+      return await fetchDirectSdk(apiKey);
+    }
+
+    const baseUrl = getApiBaseUrl();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (apiKey) headers["x-gemini-api-key"] = apiKey;
+
+    try {
       const res = await fetch(`${baseUrl}/api/tts`, {
         method: "POST",
         headers,
@@ -876,18 +857,34 @@ export async function fetchGeminiTtsAudio(params: {
           model,
           styleInstruction: cleanStyle,
           apiKey: apiKey || undefined,
+          apiKeys: allOrderedKeys.length > 0 ? allOrderedKeys : undefined,
         }),
       });
 
+      if (isBackendUnavailableStatus(res.status) && apiKey) {
+        webBackendUnavailable = true;
+        return await fetchDirectSdk(apiKey);
+      }
+
       if (!res.ok) {
-        if (res.status === 429) {
-          throw new Error("429: Kuota Gemini TTS tercapai.");
-        }
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Gagal menghasilkan suara Gemini TTS");
+        const err: any = new Error(errData.error || `Gagal menghasilkan suara Gemini TTS (${res.status})`);
+        err.status = res.status;
+        throw err;
       }
 
       return await res.json();
-    }, getCustomApiKeys().length > 1 ? 0 : 2);
+    } catch (err: any) {
+      if (apiKey && (err?.name === "TypeError" || isBackendUnavailableStatus(err?.status))) {
+        webBackendUnavailable = true;
+        return await fetchDirectSdk(apiKey);
+      }
+      throw err;
+    }
   });
+}
+
+// Re-export count helper if needed by UI
+export function getConfiguredApiKeyCount(): number {
+  return getCustomApiKeys().length;
 }

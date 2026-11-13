@@ -5,7 +5,7 @@ import { LiveVoiceMessage } from "../types";
 import { loadSavedPersonality } from "../lib/personalityPresets";
 import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
 import { ChatMessageContent } from "./ChatMessageContent";
-import { loadGeminiSettings, getCustomApiKey } from "../lib/geminiSettings";
+import { loadGeminiSettings, getOrderedRotatedKeys } from "../lib/geminiSettings";
 import { getWsBaseUrl } from "../lib/apiConfig";
 
 interface LiveVoiceModalProps {
@@ -101,7 +101,8 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
 
     const savedSettings = loadGeminiSettings();
     const effectiveVoice = initialVoice || savedSettings.voice || "Fola";
-    const apiKey = getCustomApiKey();
+    const { keys: rotatedKeys } = getOrderedRotatedKeys();
+    const apiKey = rotatedKeys[0] || "";
 
     const wsBase = getWsBaseUrl();
     const apiKeyParam = apiKey ? `&apiKey=${encodeURIComponent(apiKey)}` : "";
@@ -127,6 +128,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
           voice: effectiveVoice,
           personality: loadSavedPersonality().systemPrompt,
           apiKey: apiKey || undefined,
+          apiKeys: rotatedKeys.length > 0 ? rotatedKeys : undefined,
         })
       );
     };
