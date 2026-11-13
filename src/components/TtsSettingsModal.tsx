@@ -311,7 +311,7 @@ export const TtsSettingsModal: React.FC<TtsSettingsModalProps> = ({
               <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-start gap-2">
                 <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                 <span>
-                  Batas kuota gratis Gemini TTS telah tercapai hari ini. Sistem otomatis dialihkan ke suara perangkat lokal (Web Speech) sampai kuota direset.
+                  Batas kuota permintaan Gemini TTS tercapai (429). Tambahkan API Key cadangan di Pengaturan Gemini untuk rotasi otomatis atau tunggu beberapa saat.
                 </span>
               </div>
             )}

@@ -385,7 +385,7 @@ app.post("/api/tts/stream", async (req, res) => {
     if (!res.headersSent) {
       res.status(isQuotaExceeded ? 429 : 500).json({
         error: isQuotaExceeded
-          ? "Gemini TTS quota reached. Switched to offline device voice."
+          ? "Kuota Gemini TTS tercapai (429). Silakan rotasi API Key lain di Pengaturan Gemini atau tunggu beberapa saat."
           : error?.message || "Failed to stream Gemini TTS",
         quotaExceeded: isQuotaExceeded,
       });
@@ -394,7 +394,7 @@ app.post("/api/tts/stream", async (req, res) => {
         `data: ${JSON.stringify({
           type: "error",
           error: isQuotaExceeded
-            ? "Gemini TTS quota reached. Switched to offline device voice."
+            ? "Kuota Gemini TTS tercapai (429). Silakan rotasi API Key lain di Pengaturan Gemini atau tunggu beberapa saat."
             : error?.message || "Failed to stream Gemini TTS",
           quotaExceeded: isQuotaExceeded,
         })}\n\n`
@@ -534,9 +534,9 @@ app.post("/api/tts", async (req, res) => {
       errorMsg.includes("exceeded your current quota");
 
     if (isQuotaExceeded) {
-      console.warn("Gemini TTS quota exceeded. Client will use offline device speech synthesis.");
+      console.warn("Gemini TTS quota exceeded (429).");
       res.status(429).json({
-        error: "Gemini TTS quota reached. Switched to offline device voice.",
+        error: "Kuota Gemini TTS tercapai (429). Silakan rotasi API Key lain di Pengaturan Gemini atau tunggu beberapa saat.",
         quotaExceeded: true,
       });
       return;

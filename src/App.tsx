@@ -108,6 +108,7 @@ export default function App() {
   });
   const [isTtsSettingsOpen, setIsTtsSettingsOpen] = useState<boolean>(false);
   const [geminiQuotaReached, setGeminiQuotaReached] = useState<boolean>(false);
+  const [ttsError, setTtsError] = useState<string | null>(null);
   const [geminiVoice, setGeminiVoice] = useState<string>(() => loadGeminiSettings().voice || "Fola");
   const [styleInstruction, setStyleInstruction] = useState<string>(
     () => loadGeminiSettings().styleInstruction || ""
@@ -160,6 +161,8 @@ export default function App() {
       if (typeof detail?.styleInstruction === "string") {
         setStyleInstruction(detail.styleInstruction);
       }
+      setGeminiQuotaReached(false);
+      setTtsError(null);
     };
     window.addEventListener("gemini-settings-updated", onSettingsUpdated);
     return () => window.removeEventListener("gemini-settings-updated", onSettingsUpdated);
@@ -642,10 +645,11 @@ export default function App() {
 
     setIsSpeaking(true);
     setIsPaused(false);
+    setTtsError(null);
     isPausedRef.current = false;
 
-    // Offline Web Speech mode or when Gemini quota was exhausted
-    if (ttsEngine === "webspeech" || geminiQuotaReached || !navigator.onLine) {
+    // Only use device Web Speech when user explicitly selects the "webspeech" engine
+    if (ttsEngine === "webspeech") {
       setActiveReadingSentence(blocks[0].highlight);
       offlinePlayerRef.current.speak(textToRead, {
         rate: playbackSpeed,
@@ -667,8 +671,9 @@ export default function App() {
       return;
     }
 
-    // Gemini 3.8 Flash / Flash Lite True Streaming TTS Mode
+    // Gemini 3.8 Flash / Flash Lite True Streaming TTS Mode (no offline fallback)
     // Audio plays IMMEDIATELY as first PCM chunk arrives — never waits for full generation
+    setGeminiQuotaReached(false);
     const controller = new AbortController();
     ttsAbortControllerRef.current = controller;
     const player = streamingPlayerRef.current;
@@ -691,11 +696,8 @@ export default function App() {
       }
     }, 180);
 
-    let currentBlockIndex = 0;
-
     try {
       for (let i = 0; i < blocks.length; i++) {
-        currentBlockIndex = i;
         if (controller.signal.aborted) return;
 
         // If there is still plenty of audio buffered (> 1.4s), wait cleanly before fetching next block
@@ -749,9 +751,13 @@ export default function App() {
         return;
       }
 
-      console.warn("Gemini Stream TTS playback fallback to offline device speech:", err);
+      console.warn("Gemini Stream TTS playback stopped:", err);
       const errMsg = String(err?.message || "");
-      if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
+      const isQuota =
+        errMsg.includes("429") ||
+        errMsg.includes("RESOURCE_EXHAUSTED") ||
+        errMsg.toLowerCase().includes("quota");
+      if (isQuota) {
         setGeminiQuotaReached(true);
       }
 
@@ -761,36 +767,14 @@ export default function App() {
       }
       ttsAbortControllerRef.current = null;
       player.stop();
-
-      // Seamlessly fallback to offline speech synthesis for remaining blocks
-      const remainingText = blocks
-        .slice(currentBlockIndex)
-        .map((b) => b.block)
-        .join(" ");
-
-      if (!remainingText.trim()) {
-        setIsSpeaking(false);
-        setActiveReadingSentence(undefined);
-        return;
-      }
-
-      offlinePlayerRef.current.speak(remainingText, {
-        rate: playbackSpeed,
-        onSentenceChange: (_charIdx, s) => {
-          setActiveReadingSentence(s);
-        },
-        onEnd: () => {
-          setIsSpeaking(false);
-          setActiveReadingSentence(undefined);
-          if (autoAdvance && currentPage < totalPages) {
-            setCurrentPage((p) => p + 1);
-          }
-        },
-        onError: () => {
-          setIsSpeaking(false);
-          setActiveReadingSentence(undefined);
-        },
-      });
+      setIsSpeaking(false);
+      setIsPaused(false);
+      setActiveReadingSentence(undefined);
+      setTtsError(
+        isQuota
+          ? "Kuota / batas permintaan Gemini TTS tercapai (429). Tambahkan atau rotasi API Key lain di Pengaturan Gemini."
+          : errMsg || "Gagal memutar Gemini Stream TTS."
+      );
     }
   };
 
@@ -995,26 +979,38 @@ export default function App() {
         hasStyleInstruction={Boolean(styleInstruction.trim())}
       />
 
-      {/* Quota notification banner */}
-      {geminiQuotaReached && (
+      {/* TTS Error / Quota notification banner (no offline fallback) */}
+      {(ttsError || geminiQuotaReached) && (
         <div
           id="gemini-quota-banner"
-          className="bg-amber-950/60 border-b border-amber-800/60 px-4 py-2 text-xs text-amber-200 flex items-center justify-between shrink-0"
+          className="bg-amber-950/60 border-b border-amber-800/60 px-4 py-2 text-xs text-amber-200 flex items-center justify-between shrink-0 gap-3"
         >
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 min-w-0">
             <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
-            <span>
-              <strong>Gemini AI voice daily free limit reached (10 requests/day).</strong> Playback continues smoothly with your device's offline voice.
+            <span className="truncate sm:whitespace-normal">
+              {ttsError ||
+                "Kuota Gemini AI TTS tercapai (429). Tambahkan atau rotasi API Key cadangan di Pengaturan Gemini untuk melanjutkan."}
             </span>
           </div>
-          <button
-            onClick={() => setGeminiQuotaReached(false)}
-            className="text-amber-400 hover:text-amber-100 text-xs px-2 py-0.5 rounded bg-amber-900/40 hover:bg-amber-900/70 transition-colors cursor-pointer shrink-0 ml-4 font-medium flex items-center gap-1"
-            title="Tutup pemberitahuan"
-          >
-            <X className="w-3.5 h-3.5" />
-            <span>Tutup</span>
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => setIsGeminiSettingsOpen(true)}
+              className="text-amber-100 hover:text-white text-xs px-2.5 py-0.5 rounded bg-amber-700/60 hover:bg-amber-700 transition-colors cursor-pointer font-medium"
+            >
+              Atur API Key
+            </button>
+            <button
+              onClick={() => {
+                setGeminiQuotaReached(false);
+                setTtsError(null);
+              }}
+              className="text-amber-400 hover:text-amber-100 text-xs px-2 py-0.5 rounded bg-amber-900/40 hover:bg-amber-900/70 transition-colors cursor-pointer font-medium flex items-center gap-1"
+              title="Tutup pemberitahuan"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>Tutup</span>
+            </button>
+          </div>
         </div>
       )}
 
