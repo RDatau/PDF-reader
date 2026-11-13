@@ -11,9 +11,18 @@ import { AiAssistantPanel } from "./components/AiAssistantPanel";
 import { DocumentLibraryModal } from "./components/DocumentLibraryModal";
 import { AppearanceModal } from "./components/AppearanceModal";
 import { TtsSettingsModal } from "./components/TtsSettingsModal";
+import { TtsLibraryModal } from "./components/TtsLibraryModal";
 import { GeminiSettingsModal } from "./components/GeminiSettingsModal";
 import { OfflineIndicator } from "./components/OfflineIndicator";
-import { ReadingTheme, StoredDocument, TtsEngine, AppearanceSettings, GeminiTtsModelId } from "./types";
+import {
+  ReadingTheme,
+  StoredDocument,
+  TtsEngine,
+  AppearanceSettings,
+  GeminiTtsModelId,
+  TtsFilterSettings,
+  StoredTtsAudioMeta,
+} from "./types";
 import {
   saveDocument,
   getAllDocuments,
@@ -21,8 +30,20 @@ import {
   deleteDocument,
   updateProgress,
 } from "./lib/pdfStorage";
+import {
+  cleanPdfDisplayTitle,
+  cleanupStalePageParts,
+  formatTtsClipTitle,
+  getAllTtsClipsMeta,
+  saveTtsClip,
+} from "./lib/ttsAudioStorage";
 import { generateSamplePdfArrayBuffer } from "./lib/samplePdf";
-import { OfflineSpeechPlayer, StreamingTtsPlayer } from "./lib/audioUtils";
+import {
+  OfflineSpeechPlayer,
+  StreamingTtsPlayer,
+  decodeBase64PcmChunk,
+  pcmChunksToWavBuffer,
+} from "./lib/audioUtils";
 import { WindowsTitlebar } from "./components/WindowsTitlebar";
 import { loadGeminiSettings, saveGeminiSettings } from "./lib/geminiSettings";
 import { normalizeGeminiTtsModel } from "./lib/geminiModels";
@@ -121,6 +142,8 @@ export default function App() {
   const [rotation, setRotation] = useState<number>(0);
   const [bookmarks, setBookmarks] = useState<number[]>([]);
   const [pageText, setPageText] = useState<string>("");
+  const [ttsPageText, setTtsPageText] = useState<string>("");
+  const [filteredTtsHeaders, setFilteredTtsHeaders] = useState<string[]>([]);
 
   // Library state
   const [documentsList, setDocumentsList] = useState<Omit<StoredDocument, "data">[]>([]);
@@ -142,6 +165,8 @@ export default function App() {
     return normalizeGeminiTtsModel(stored);
   });
   const [isTtsSettingsOpen, setIsTtsSettingsOpen] = useState<boolean>(false);
+  const [isTtsLibraryOpen, setIsTtsLibraryOpen] = useState<boolean>(false);
+  const [ttsClipsList, setTtsClipsList] = useState<StoredTtsAudioMeta[]>([]);
   const [geminiQuotaReached, setGeminiQuotaReached] = useState<boolean>(false);
   const [ttsError, setTtsError] = useState<string | null>(null);
   const [geminiVoice, setGeminiVoice] = useState<string>(() => loadGeminiSettings().voice || "Fola");
@@ -150,10 +175,40 @@ export default function App() {
   );
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
   const [autoAdvance, setAutoAdvance] = useState<boolean>(true);
+  const [ttsFilterSettings, setTtsFilterSettings] = useState<TtsFilterSettings>(() => {
+    const defaults: TtsFilterSettings = {
+      skipHeadersFooters: true,
+      skipChapterHeadings: false,
+      customIgnoredLines: [],
+    };
+    try {
+      const saved = localStorage.getItem("vox_tts_filter_settings");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          skipHeadersFooters:
+            typeof parsed.skipHeadersFooters === "boolean" ? parsed.skipHeadersFooters : true,
+          skipChapterHeadings:
+            typeof parsed.skipChapterHeadings === "boolean" ? parsed.skipChapterHeadings : false,
+          customIgnoredLines: Array.isArray(parsed.customIgnoredLines)
+            ? parsed.customIgnoredLines.filter((s: unknown) => typeof s === "string")
+            : [],
+        };
+      }
+    } catch {}
+    return defaults;
+  });
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [activeReadingSentence, setActiveReadingSentence] = useState<string | undefined>(undefined);
   const [selectedSnippet, setSelectedSnippet] = useState<string>("");
+
+  const handleTtsFilterSettingsChange = (next: TtsFilterSettings) => {
+    setTtsFilterSettings(next);
+    try {
+      localStorage.setItem("vox_tts_filter_settings", JSON.stringify(next));
+    } catch {}
+  };
 
   const handleGeminiModelChange = (model: GeminiTtsModelId) => {
     const normalized = normalizeGeminiTtsModel(model);
@@ -234,11 +289,26 @@ export default function App() {
     localStorage.setItem("lumina_dimmer", level.toString());
   };
 
+  const refreshTtsClipsList = async () => {
+    try {
+      const clips = await getAllTtsClipsMeta();
+      setTtsClipsList(clips);
+    } catch (err) {
+      console.warn("Failed to load TTS clips:", err);
+    }
+  };
+
   // Load Library & Initial Document on Mount
   useEffect(() => {
     let isCancelled = false;
     async function init() {
       try {
+        getAllTtsClipsMeta()
+          .then((clips) => {
+            if (!isCancelled) setTtsClipsList(clips);
+          })
+          .catch(() => {});
+
         const list = await getAllDocuments();
         if (isCancelled) return;
         setDocumentsList(list);
@@ -693,12 +763,21 @@ export default function App() {
     return blocks;
   };
 
-  const playTextAloud = async (textToRead: string) => {
+  const playTextAloud = async (
+    textToRead: string,
+    playOptions?: { isSelection?: boolean }
+  ) => {
     handleStopSpeaking();
     if (!textToRead.trim()) return;
 
     const blocks = splitIntoStreamBlocks(textToRead);
     if (blocks.length === 0) return;
+
+    const isSelection = Boolean(playOptions?.isSelection);
+    const snapshotDocId = currentDocId;
+    const snapshotDocName = currentDocName;
+    const snapshotPage = currentPage;
+    const selectionBatchTag = Date.now();
 
     setIsSpeaking(true);
     setIsPaused(false);
@@ -765,6 +844,8 @@ export default function App() {
 
         player.beginNewUtterance();
         let recordedMarker = false;
+        const pcmChunks: Uint8Array[] = [];
+        let isFirstChunkOfBlock = true;
 
         await streamGeminiTtsAudio({
           text: blocks[i].block,
@@ -774,6 +855,15 @@ export default function App() {
           signal: controller.signal,
           onChunk: (pcmBase64) => {
             if (controller.signal.aborted) return;
+            try {
+              const decoded = decodeBase64PcmChunk(pcmBase64, isFirstChunkOfBlock);
+              isFirstChunkOfBlock = false;
+              if (decoded.byteLength > 0) {
+                pcmChunks.push(decoded);
+              }
+            } catch {
+              isFirstChunkOfBlock = false;
+            }
             const scheduled = player.enqueuePcmBase64(pcmBase64);
             if (scheduled && !recordedMarker) {
               recordedMarker = true;
@@ -784,6 +874,49 @@ export default function App() {
             }
           },
         });
+
+        // Persist completed TTS block as WAV in local IndexedDB database
+        if (!controller.signal.aborted && pcmChunks.length > 0) {
+          try {
+            const { wavBuffer, durationSeconds } = pcmChunksToWavBuffer(pcmChunks, 24000, 1, 16);
+            const partNumber = i + 1;
+            const partStr = String(partNumber).padStart(2, "0");
+            const clipTitle = formatTtsClipTitle(
+              snapshotDocName,
+              snapshotPage,
+              partNumber,
+              isSelection
+            );
+            const clipId = isSelection
+              ? `${snapshotDocId}::p${snapshotPage}::sel_${selectionBatchTag}_${partStr}`
+              : `${snapshotDocId}::p${snapshotPage}::${partStr}`;
+
+            await saveTtsClip({
+              id: clipId,
+              title: clipTitle,
+              docId: snapshotDocId,
+              docTitle: cleanPdfDisplayTitle(snapshotDocName),
+              pageNumber: snapshotPage,
+              partNumber,
+              totalParts: blocks.length,
+              textExcerpt: blocks[i].block.slice(0, 180),
+              voice: geminiVoice,
+              model: geminiTtsModel,
+              durationSeconds,
+              sizeBytes: wavBuffer.byteLength,
+              mimeType: "audio/wav",
+              audioData: wavBuffer,
+              createdAt: Date.now(),
+            });
+
+            if (!isSelection && i === blocks.length - 1) {
+              await cleanupStalePageParts(snapshotDocId, snapshotPage, blocks.length);
+            }
+            void refreshTtsClipsList();
+          } catch (saveErr) {
+            console.warn("Failed to save generated TTS clip to IndexedDB:", saveErr);
+          }
+        }
       }
 
       if (!controller.signal.aborted) {
@@ -836,15 +969,16 @@ export default function App() {
   };
 
   const handlePlayPage = () => {
-    if (pageText) {
-      playTextAloud(pageText);
+    const textForSpeech = ttsPageText.trim() || pageText;
+    if (textForSpeech) {
+      playTextAloud(textForSpeech, { isSelection: false });
     }
   };
 
   const handleReadSelectedText = (snippet?: string) => {
     const text = snippet || selectedSnippet;
     if (text) {
-      playTextAloud(text);
+      playTextAloud(text, { isSelection: true });
     }
   };
 
@@ -887,7 +1021,7 @@ export default function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [totalPages, isSpeaking, isPaused, pageText]);
+  }, [totalPages, isSpeaking, isPaused, pageText, ttsPageText]);
 
   // Drag and drop PDF upload
   const handleDragOver = (e: React.DragEvent) => {
@@ -1018,6 +1152,11 @@ export default function App() {
         geminiModel={geminiTtsModel}
         onGeminiModelChange={handleGeminiModelChange}
         onOpenTtsSettings={() => setIsTtsSettingsOpen(true)}
+        onOpenTtsLibrary={() => {
+          void refreshTtsClipsList();
+          setIsTtsLibraryOpen(true);
+        }}
+        ttsClipsCount={ttsClipsList.length}
         geminiVoice={geminiVoice}
         onGeminiVoiceChange={handleGeminiVoiceChange}
         playbackSpeed={playbackSpeed}
@@ -1123,6 +1262,7 @@ export default function App() {
         {/* Central PDF Viewer Canvas */}
         <PdfViewer
           pdfDoc={pdfDoc}
+          docTitle={currentDocName}
           isLoading={isDocLoading}
           error={docError}
           currentPage={currentPage}
@@ -1139,6 +1279,11 @@ export default function App() {
           onOpenAppearanceModal={() => setIsAppearanceOpen(true)}
           dimmerLevel={dimmerLevel}
           onPageTextExtracted={setPageText}
+          onPageTtsTextExtracted={(filteredText, filteredHeaders) => {
+            setTtsPageText(filteredText);
+            setFilteredTtsHeaders(filteredHeaders);
+          }}
+          ttsFilterSettings={ttsFilterSettings}
           activeReadingSentence={activeReadingSentence}
           onReadSelectedText={(snippet) => {
             setSelectedSnippet(snippet);
@@ -1216,8 +1361,26 @@ export default function App() {
         onPlaybackSpeedChange={setPlaybackSpeed}
         autoAdvance={autoAdvance}
         onAutoAdvanceChange={setAutoAdvance}
+        ttsFilterSettings={ttsFilterSettings}
+        onTtsFilterSettingsChange={handleTtsFilterSettingsChange}
+        filteredHeadersOnCurrentPage={filteredTtsHeaders}
+        onOpenTtsLibrary={() => {
+          void refreshTtsClipsList();
+          setIsTtsLibraryOpen(true);
+        }}
+        ttsClipsCount={ttsClipsList.length}
         onOpenLiveVoice={() => setIsLiveVoiceOpen(true)}
         geminiQuotaReached={geminiQuotaReached}
+      />
+
+      {/* Saved Generated TTS Audio Library Modal */}
+      <TtsLibraryModal
+        isOpen={isTtsLibraryOpen}
+        onClose={() => setIsTtsLibraryOpen(false)}
+        clips={ttsClipsList}
+        currentDocId={currentDocId}
+        currentDocName={currentDocName}
+        onRefreshClips={refreshTtsClipsList}
       />
 
       {/* Offline Stored Documents Library Modal */}

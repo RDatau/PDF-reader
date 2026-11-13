@@ -1,9 +1,9 @@
 import "../polyfills";
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
-import { AppearanceSettings } from "../types";
+import { AppearanceSettings, TtsFilterSettings } from "../types";
 import { DARK_PRESETS, LIGHT_PRESETS, TEXT_TONES, FONT_OPTIONS } from "../lib/themePresets";
-import { extractStructuredTextFromPdfPage } from "../lib/pdfTextExtractor";
+import { extractPageEdgeLines, extractStructuredTextFromPdfPage } from "../lib/pdfTextExtractor";
 import {
   Sparkles,
   Volume2,
@@ -11,7 +11,6 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
-  MoveHorizontal,
   BookOpen,
   FileText,
   Type,
@@ -39,6 +38,7 @@ try {
 
 interface PdfViewerProps {
   pdfDoc: any | null;
+  docTitle?: string;
   isLoading?: boolean;
   error?: string | null;
   currentPage: number;
@@ -52,6 +52,8 @@ interface PdfViewerProps {
   onOpenAppearanceModal?: () => void;
   dimmerLevel: number;
   onPageTextExtracted: (text: string) => void;
+  onPageTtsTextExtracted?: (ttsText: string, filteredHeaders: string[]) => void;
+  ttsFilterSettings?: TtsFilterSettings;
   activeReadingSentence?: string;
   onReadSelectedText: (text: string) => void;
   onAskAiAboutText: (text: string) => void;
@@ -63,6 +65,7 @@ interface PdfViewerProps {
 
 export const PdfViewer: React.FC<PdfViewerProps> = ({
   pdfDoc,
+  docTitle,
   isLoading = false,
   error = null,
   currentPage,
@@ -75,6 +78,8 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
   onOpenAppearanceModal,
   dimmerLevel,
   onPageTextExtracted,
+  onPageTtsTextExtracted,
+  ttsFilterSettings,
   activeReadingSentence,
   onReadSelectedText,
   onAskAiAboutText,
@@ -85,6 +90,13 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const activeRenderTaskRef = useRef<any>(null);
+  const lastRawPageTextRef = useRef<{
+    textContent: any;
+    pageView?: number[];
+    neighborTopTexts: string[];
+    neighborBottomTexts: string[];
+  } | null>(null);
+  const edgeCacheRef = useRef<Map<number, { topLines: string[]; bottomLines: string[] }>>(new Map());
   const [containerWidth, setContainerWidth] = useState<number>(() =>
     typeof window !== "undefined" ? window.innerWidth : 800
   );
@@ -109,6 +121,33 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
       setIsReadingBannerDismissed(false);
     }
   }, [activeReadingSentence]);
+
+  // Clear edge cache when document changes
+  useEffect(() => {
+    edgeCacheRef.current.clear();
+    lastRawPageTextRef.current = null;
+  }, [pdfDoc]);
+
+  // Re-run TTS text filtering immediately whenever TTS filter settings or docTitle change
+  useEffect(() => {
+    const raw = lastRawPageTextRef.current;
+    if (!raw) return;
+    const extraction = extractStructuredTextFromPdfPage(raw.textContent, {
+      pageView: raw.pageView,
+      docTitle,
+      neighborTopTexts: raw.neighborTopTexts,
+      neighborBottomTexts: raw.neighborBottomTexts,
+      skipHeadersFooters: ttsFilterSettings?.skipHeadersFooters ?? true,
+      skipChapterHeadings: ttsFilterSettings?.skipChapterHeadings ?? false,
+      customIgnoredLines: ttsFilterSettings?.customIgnoredLines ?? [],
+    });
+    onPageTtsTextExtracted?.(extraction.ttsText, extraction.filteredHeaders);
+  }, [
+    docTitle,
+    ttsFilterSettings?.skipHeadersFooters,
+    ttsFilterSettings?.skipChapterHeadings,
+    ttsFilterSettings?.customIgnoredLines,
+  ]);
 
   // Slide / Swipe to flip page gesture state
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
@@ -152,6 +191,23 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
 
     let isCancelled = false;
 
+    const getNeighborEdges = async (pageNum: number) => {
+      if (pageNum < 1 || pageNum > pdfDoc.numPages) {
+        return { topLines: [], bottomLines: [] };
+      }
+      const cached = edgeCacheRef.current.get(pageNum);
+      if (cached) return cached;
+      try {
+        const neighborPage = await pdfDoc.getPage(pageNum);
+        const neighborText = await neighborPage.getTextContent();
+        const edges = extractPageEdgeLines(neighborText);
+        edgeCacheRef.current.set(pageNum, edges);
+        return edges;
+      } catch {
+        return { topLines: [], bottomLines: [] };
+      }
+    };
+
     const renderPage = async () => {
       let renderTask: any = null;
       try {
@@ -162,10 +218,46 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         try {
           const textContent = await page.getTextContent();
           if (isCancelled) return;
-          const extraction = extractStructuredTextFromPdfPage(textContent);
+
+          const neighborTopTexts: string[] = [];
+          const neighborBottomTexts: string[] = [];
+          const adjacentPageNums = [currentPage - 1, currentPage + 1].filter(
+            (n) => n >= 1 && n <= pdfDoc.numPages
+          );
+          if (adjacentPageNums.length > 0) {
+            const neighborResults = await Promise.all(adjacentPageNums.map(getNeighborEdges));
+            if (isCancelled) return;
+            for (const nr of neighborResults) {
+              neighborTopTexts.push(...nr.topLines);
+              neighborBottomTexts.push(...nr.bottomLines);
+            }
+          }
+
+          const extraction = extractStructuredTextFromPdfPage(textContent, {
+            pageView: page.view,
+            docTitle,
+            neighborTopTexts,
+            neighborBottomTexts,
+            skipHeadersFooters: ttsFilterSettings?.skipHeadersFooters ?? true,
+            skipChapterHeadings: ttsFilterSettings?.skipChapterHeadings ?? false,
+            customIgnoredLines: ttsFilterSettings?.customIgnoredLines ?? [],
+          });
+
+          edgeCacheRef.current.set(currentPage, {
+            topLines: extraction.topLines,
+            bottomLines: extraction.bottomLines,
+          });
+          lastRawPageTextRef.current = {
+            textContent,
+            pageView: page.view,
+            neighborTopTexts,
+            neighborBottomTexts,
+          };
+
           setPageTextContent(extraction.fullText);
           setPageParagraphs(extraction.paragraphs);
           onPageTextExtracted(extraction.fullText);
+          onPageTtsTextExtracted?.(extraction.ttsText, extraction.filteredHeaders);
         } catch (e: any) {
           if (
             isCancelled ||

@@ -65,11 +65,11 @@
           if (!Map.prototype.getOrInsertComputed) {
             Object.defineProperty(Map.prototype, "getOrInsertComputed", {
               value: function(key, callbackfn) {
-                if (this.has(key)) return this.get(key);
+                var actualKey = (key === 0 && 1 / key === -Infinity) ? 0 : key;
+                if (this.has(actualKey)) return this.get(actualKey);
                 if (typeof callbackfn !== "function") throw new TypeError(callbackfn + " is not a function");
-                if (key === 0 && 1 / key === -Infinity) key = 0;
-                var val = callbackfn(key);
-                this.set(key, val);
+                var val = callbackfn(actualKey);
+                this.set(actualKey, val);
                 return val;
               },
               writable: true, configurable: true, enumerable: false
@@ -90,10 +90,11 @@
           if (!WeakMap.prototype.getOrInsertComputed) {
             Object.defineProperty(WeakMap.prototype, "getOrInsertComputed", {
               value: function(key, callbackfn) {
-                if (this.has(key)) return this.get(key);
+                var actualKey = (key === 0 && 1 / key === -Infinity) ? 0 : key;
+                if (this.has(actualKey)) return this.get(actualKey);
                 if (typeof callbackfn !== "function") throw new TypeError(callbackfn + " is not a function");
-                var val = callbackfn(key);
-                this.set(key, val);
+                var val = callbackfn(actualKey);
+                this.set(actualKey, val);
                 return val;
               },
               writable: true, configurable: true, enumerable: false
@@ -119,6 +120,17 @@
                 reject = rej;
               });
               return { promise: promise, resolve: resolve, reject: reject };
+            },
+            writable: true, configurable: true, enumerable: false
+          });
+        }
+        if (typeof Promise !== "undefined" && !Promise.try) {
+          Object.defineProperty(Promise, "try", {
+            value: function(callbackfn) {
+              var args = Array.prototype.slice.call(arguments, 1);
+              return new this(function(resolve) {
+                resolve(callbackfn.apply(undefined, args));
+              });
             },
             writable: true, configurable: true, enumerable: false
           });

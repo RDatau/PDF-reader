@@ -30,6 +30,7 @@ import {
   Sliders,
   Cpu,
   Headphones,
+  FileAudio,
 } from "lucide-react";
 import { ReadingTheme, TtsEngine, AppearanceSettings, GeminiTtsModelId } from "../types";
 import { FONT_OPTIONS } from "../lib/themePresets";
@@ -79,6 +80,8 @@ interface ToolbarProps {
   geminiQuotaReached?: boolean;
   hasStyleInstruction?: boolean;
   onOpenTtsSettings?: () => void;
+  onOpenTtsLibrary?: () => void;
+  ttsClipsCount?: number;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
@@ -124,6 +127,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   geminiQuotaReached,
   hasStyleInstruction,
   onOpenTtsSettings,
+  onOpenTtsLibrary,
+  ttsClipsCount = 0,
 }) => {
   const [showMobileMoreMenu, setShowMobileMoreMenu] = useState(false);
   const [showJumpModal, setShowJumpModal] = useState(false);
@@ -436,6 +441,24 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                   className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-400"
                   aria-hidden="true"
                 />
+              )}
+            </button>
+          )}
+
+          {/* Saved Generated TTS Audio Library Button */}
+          {onOpenTtsLibrary && (
+            <button
+              id="btn-open-tts-library"
+              onClick={onOpenTtsLibrary}
+              className="flex items-center gap-1 px-2 py-0.5 rounded border border-emerald-500/40 bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-300 hover:text-emerald-200 text-[11px] font-semibold transition-colors cursor-pointer"
+              title="Lihat & Download Semua Hasil Generate Audio TTS"
+            >
+              <FileAudio className="w-3 h-3 text-emerald-400" />
+              <span className="hidden xl:inline">Hasil TTS</span>
+              {ttsClipsCount > 0 && (
+                <span className="px-1 rounded-full bg-emerald-500/25 text-emerald-200 text-[10px] font-mono font-bold">
+                  {ttsClipsCount}
+                </span>
               )}
             </button>
           )}
@@ -819,6 +842,33 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                 Ubah Model
               </button>
             </div>
+
+            {onOpenTtsLibrary && (
+              <div className="p-3 rounded-xl bg-[#1A1F29] border border-[#252B36] flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-7 h-7 rounded-lg bg-emerald-600/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                    <FileAudio className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-semibold text-gray-200 block">
+                      Hasil Generate Audio TTS
+                    </span>
+                    <span className="text-[10px] text-gray-400 font-mono">
+                      {ttsClipsCount} audio tersimpan
+                    </span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setShowMobileMoreMenu(false);
+                    onOpenTtsLibrary();
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  Lihat &amp; Unduh
+                </button>
+              </div>
+            )}
 
             {/* Mobile Typography & Reading Mode Section */}
             <div className="p-3 rounded-xl bg-[#1A1F29] border border-[#252B36] space-y-3">

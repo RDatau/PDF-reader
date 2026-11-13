@@ -22,6 +22,12 @@ export interface AppearanceSettings {
 
 export type TtsEngine = "gemini" | "webspeech";
 
+export interface TtsFilterSettings {
+  skipHeadersFooters: boolean;
+  skipChapterHeadings: boolean;
+  customIgnoredLines: string[];
+}
+
 export type GeminiTtsModelId =
   | "gemini-3.8-flash-lite-tts"
   | "gemini-3.8-flash-tts";
@@ -48,6 +54,26 @@ export interface StoredDocument {
   data: ArrayBuffer;
   bookmarks: number[];
 }
+
+export interface StoredTtsAudio {
+  id: string;
+  title: string;
+  docId: string;
+  docTitle: string;
+  pageNumber: number;
+  partNumber: number;
+  totalParts: number;
+  textExcerpt: string;
+  voice: string;
+  model: string;
+  durationSeconds: number;
+  sizeBytes: number;
+  mimeType: string;
+  audioData: ArrayBuffer;
+  createdAt: number;
+}
+
+export type StoredTtsAudioMeta = Omit<StoredTtsAudio, "audioData">;
 
 export interface SearchMatch {
   pageNumber: number;

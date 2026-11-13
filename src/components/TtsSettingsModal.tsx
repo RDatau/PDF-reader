@@ -15,8 +15,10 @@ import {
   Loader2,
   MessageSquareQuote,
   Eraser,
+  Filter,
+  FileAudio,
 } from "lucide-react";
-import { TtsEngine, GeminiTtsModelId } from "../types";
+import { TtsEngine, GeminiTtsModelId, TtsFilterSettings } from "../types";
 import { GEMINI_TTS_MODELS, GEMINI_VOICE_OPTIONS } from "../lib/geminiModels";
 import { streamGeminiTtsAudio } from "../lib/geminiApiBridge";
 import { StreamingTtsPlayer } from "../lib/audioUtils";
@@ -36,6 +38,11 @@ interface TtsSettingsModalProps {
   onPlaybackSpeedChange: (speed: number) => void;
   autoAdvance: boolean;
   onAutoAdvanceChange: (auto: boolean) => void;
+  ttsFilterSettings: TtsFilterSettings;
+  onTtsFilterSettingsChange: (settings: TtsFilterSettings) => void;
+  filteredHeadersOnCurrentPage?: string[];
+  onOpenTtsLibrary?: () => void;
+  ttsClipsCount?: number;
   onOpenLiveVoice: () => void;
   geminiQuotaReached: boolean;
 }
@@ -74,6 +81,11 @@ export const TtsSettingsModal: React.FC<TtsSettingsModalProps> = ({
   onPlaybackSpeedChange,
   autoAdvance,
   onAutoAdvanceChange,
+  ttsFilterSettings,
+  onTtsFilterSettingsChange,
+  filteredHeadersOnCurrentPage = [],
+  onOpenTtsLibrary,
+  ttsClipsCount = 0,
   onOpenLiveVoice,
   geminiQuotaReached,
 }) => {
@@ -520,6 +532,139 @@ export const TtsSettingsModal: React.FC<TtsSettingsModalProps> = ({
           </div>
         </div>
 
+        {/* 4B. Header / Chapter Title / Footer TTS Filter */}
+        <div className="space-y-2.5 pt-2 border-t border-[#222731]">
+          <div className="flex items-center justify-between gap-2">
+            <label className="text-xs font-semibold text-gray-300 uppercase tracking-wider flex items-center gap-1.5">
+              <Filter className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Filter Teks Pembacaan (TTS)</span>
+            </label>
+            {filteredHeadersOnCurrentPage.length > 0 && (
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-medium">
+                {filteredHeadersOnCurrentPage.length} baris disaring di halaman ini
+              </span>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <button
+              type="button"
+              id="btn-toggle-skip-headers-footers"
+              onClick={() =>
+                onTtsFilterSettingsChange({
+                  ...ttsFilterSettings,
+                  skipHeadersFooters: !ttsFilterSettings.skipHeadersFooters,
+                })
+              }
+              className={`w-full p-2.5 rounded-lg border text-left flex items-center justify-between gap-3 transition-all cursor-pointer ${
+                ttsFilterSettings.skipHeadersFooters
+                  ? "bg-emerald-600/10 border-emerald-500/40 text-emerald-200"
+                  : "bg-[#0F131A] border-[#252B36] text-gray-400 hover:border-gray-600"
+              }`}
+            >
+              <div className="space-y-0.5">
+                <span className="text-xs font-semibold block text-gray-100">
+                  Saring Header, Judul Chapter & Nomor Halaman
+                </span>
+                <span className="text-[10px] text-gray-400 block leading-relaxed">
+                  Otomatis melewati judul PDF/chapter di margin atas (running header) serta nomor halaman di bawah agar tidak ikut dibacakan.
+                </span>
+              </div>
+              <div
+                className={`w-8 h-4 rounded-full transition-colors relative shrink-0 ${
+                  ttsFilterSettings.skipHeadersFooters ? "bg-emerald-600" : "bg-gray-700"
+                }`}
+              >
+                <div
+                  className={`w-3 h-3 rounded-full bg-white absolute top-0.5 transition-transform ${
+                    ttsFilterSettings.skipHeadersFooters ? "left-4.5" : "left-0.5"
+                  }`}
+                />
+              </div>
+            </button>
+
+            <button
+              type="button"
+              id="btn-toggle-skip-chapter-headings"
+              onClick={() =>
+                onTtsFilterSettingsChange({
+                  ...ttsFilterSettings,
+                  skipChapterHeadings: !ttsFilterSettings.skipChapterHeadings,
+                })
+              }
+              className={`w-full p-2.5 rounded-lg border text-left flex items-center justify-between gap-3 transition-all cursor-pointer ${
+                ttsFilterSettings.skipChapterHeadings
+                  ? "bg-blue-600/10 border-blue-500/40 text-blue-200"
+                  : "bg-[#0F131A] border-[#252B36] text-gray-400 hover:border-gray-600"
+              }`}
+            >
+              <div className="space-y-0.5">
+                <span className="text-xs font-semibold block text-gray-100">
+                  Lewati Juga Judul Bab / Subjudul di Badan Halaman
+                </span>
+                <span className="text-[10px] text-gray-400 block leading-relaxed">
+                  Jika aktif, judul bab atau heading singkat di tengah halaman juga tidak akan dibacakan oleh TTS.
+                </span>
+              </div>
+              <div
+                className={`w-8 h-4 rounded-full transition-colors relative shrink-0 ${
+                  ttsFilterSettings.skipChapterHeadings ? "bg-blue-600" : "bg-gray-700"
+                }`}
+              >
+                <div
+                  className={`w-3 h-3 rounded-full bg-white absolute top-0.5 transition-transform ${
+                    ttsFilterSettings.skipChapterHeadings ? "left-4.5" : "left-0.5"
+                  }`}
+                />
+              </div>
+            </button>
+          </div>
+
+          <div className="space-y-1">
+            <label
+              htmlFor="input-tts-custom-ignore"
+              className="text-[11px] font-medium text-gray-400 block"
+            >
+              Pengecualian Manual (opsional, 1 frasa/judul per baris)
+            </label>
+            <textarea
+              id="input-tts-custom-ignore"
+              rows={2}
+              value={ttsFilterSettings.customIgnoredLines.join("\n")}
+              onChange={(e) =>
+                onTtsFilterSettingsChange({
+                  ...ttsFilterSettings,
+                  customIgnoredLines: e.target.value
+                    .split(/\r?\n/)
+                    .map((line) => line.trim())
+                    .filter((line) => line.length > 0),
+                })
+              }
+              placeholder="Contoh: Kisah Keluarga Penzinah&#10;Hak Cipta © 2026"
+              className="w-full rounded-lg border border-[#252B36] focus:border-emerald-500 bg-[#0D1017] px-3 py-1.5 text-xs text-gray-100 placeholder-gray-500 focus:outline-hidden resize-y leading-relaxed"
+            />
+          </div>
+
+          {filteredHeadersOnCurrentPage.length > 0 && (
+            <div className="p-2 rounded-lg bg-[#0D1017] border border-emerald-500/25 text-[11px] text-emerald-300/90 space-y-1">
+              <span className="font-semibold block text-[10px] uppercase tracking-wider text-emerald-400">
+                Terdeteksi &amp; Dilewati TTS pada Halaman Ini:
+              </span>
+              <div className="flex flex-wrap gap-1">
+                {filteredHeadersOnCurrentPage.map((h, idx) => (
+                  <span
+                    key={`${h}-${idx}`}
+                    className="px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-[10px] font-mono truncate max-w-full"
+                    title={h}
+                  >
+                    {h}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* 5. Voice Preview & Test Playback */}
         <div className="p-3 rounded-lg bg-[#0F131A] border border-[#252B36] space-y-2">
           <div className="flex items-center justify-between">
@@ -571,19 +716,36 @@ export const TtsSettingsModal: React.FC<TtsSettingsModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between pt-2 border-t border-[#222731]">
-          <button
-            type="button"
-            onClick={() => {
-              handleStopTest();
-              onClose();
-              onOpenLiveVoice();
-            }}
-            className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 font-medium cursor-pointer"
-          >
-            <Mic className="w-3.5 h-3.5" />
-            <span>Mode Percakapan Suara Live (Real-Time)</span>
-          </button>
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#222731]">
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                handleStopTest();
+                onClose();
+                onOpenLiveVoice();
+              }}
+              className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 font-medium cursor-pointer"
+            >
+              <Mic className="w-3.5 h-3.5" />
+              <span>Suara Live</span>
+            </button>
+
+            {onOpenTtsLibrary && (
+              <button
+                type="button"
+                onClick={() => {
+                  handleStopTest();
+                  onClose();
+                  onOpenTtsLibrary();
+                }}
+                className="flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300 font-medium cursor-pointer"
+              >
+                <FileAudio className="w-3.5 h-3.5" />
+                <span>Hasil TTS Tersimpan ({ttsClipsCount})</span>
+              </button>
+            )}
+          </div>
 
           <button
             type="button"

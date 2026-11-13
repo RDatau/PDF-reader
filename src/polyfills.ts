@@ -44,17 +44,15 @@ if (typeof Map !== "undefined") {
   if (typeof (Map.prototype as any).getOrInsertComputed !== "function") {
     Object.defineProperty(Map.prototype, "getOrInsertComputed", {
       value: function (key: any, callbackfn: (k: any) => any) {
-        if (this.has(key)) {
-          return this.get(key);
+        const actualKey = key === 0 && 1 / key === -Infinity ? 0 : key;
+        if (this.has(actualKey)) {
+          return this.get(actualKey);
         }
         if (typeof callbackfn !== "function") {
           throw new TypeError(callbackfn + " is not a function");
         }
-        if (key === 0 && 1 / key === -Infinity) {
-          key = 0;
-        }
-        const value = callbackfn(key);
-        this.set(key, value);
+        const value = callbackfn(actualKey);
+        this.set(actualKey, value);
         return value;
       },
       writable: true,
@@ -83,14 +81,15 @@ if (typeof WeakMap !== "undefined") {
   if (typeof (WeakMap.prototype as any).getOrInsertComputed !== "function") {
     Object.defineProperty(WeakMap.prototype, "getOrInsertComputed", {
       value: function (key: any, callbackfn: (k: any) => any) {
-        if (this.has(key)) {
-          return this.get(key);
+        const actualKey = key === 0 && 1 / key === -Infinity ? 0 : key;
+        if (this.has(actualKey)) {
+          return this.get(actualKey);
         }
         if (typeof callbackfn !== "function") {
           throw new TypeError(callbackfn + " is not a function");
         }
-        const value = callbackfn(key);
-        this.set(key, value);
+        const value = callbackfn(actualKey);
+        this.set(actualKey, value);
         return value;
       },
       writable: true,
@@ -125,6 +124,19 @@ if (typeof Promise !== "undefined" && typeof (Promise as any).withResolvers !== 
         reject = rej;
       });
       return { promise, resolve, reject };
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+}
+
+if (typeof Promise !== "undefined" && typeof (Promise as any).try !== "function") {
+  Object.defineProperty(Promise, "try", {
+    value: function (callbackfn: (...args: any[]) => any, ...args: any[]) {
+      return new (this as any)((resolve: (v: any) => void) => {
+        resolve(callbackfn(...args));
+      });
     },
     writable: true,
     configurable: true,
@@ -182,7 +194,7 @@ if (typeof Uint8Array !== "undefined") {
 }
 
 if (typeof globalThis !== "undefined") {
-  (globalThis as any).pdfjsVersion = "6.3.289";
+  (globalThis as any).pdfjsVersion = "6.5.438";
 }
 
 export {};

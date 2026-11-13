@@ -379,3 +379,83 @@ export class OfflineSpeechPlayer {
     return window.speechSynthesis.getVoices();
   }
 }
+
+/**
+ * Decodes a base64 PCM chunk into raw Uint8Array bytes.
+ * Strips any leading 44-byte RIFF/WAVE header if stripHeader is true.
+ */
+export function decodeBase64PcmChunk(base64Pcm: string, stripHeader = false): Uint8Array {
+  const binaryString = atob(base64Pcm);
+  let bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  if (
+    stripHeader &&
+    bytes.length > 44 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46
+  ) {
+    bytes = bytes.subarray(44);
+  }
+  return bytes;
+}
+
+/**
+ * Concatenates raw 16-bit mono PCM chunks into a complete playable & downloadable WAV ArrayBuffer.
+ */
+export function pcmChunksToWavBuffer(
+  chunks: Uint8Array[],
+  sampleRate = 24000,
+  numChannels = 1,
+  bitsPerSample = 16
+): { wavBuffer: ArrayBuffer; durationSeconds: number } {
+  let totalPcmBytes = 0;
+  for (const c of chunks) {
+    totalPcmBytes += c.byteLength;
+  }
+
+  // Ensure even byte count for 16-bit PCM alignment
+  const alignedPcmBytes = totalPcmBytes - (totalPcmBytes % 2);
+  const wavBuffer = new ArrayBuffer(44 + alignedPcmBytes);
+  const view = new DataView(wavBuffer);
+  const outBytes = new Uint8Array(wavBuffer);
+
+  const writeAscii = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      outBytes[offset + i] = str.charCodeAt(i);
+    }
+  };
+
+  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+
+  writeAscii(0, "RIFF");
+  view.setUint32(4, 36 + alignedPcmBytes, true);
+  writeAscii(8, "WAVE");
+  writeAscii(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeAscii(36, "data");
+  view.setUint32(40, alignedPcmBytes, true);
+
+  let cursor = 44;
+  let remaining = alignedPcmBytes;
+  for (const chunk of chunks) {
+    if (remaining <= 0) break;
+    const toCopy = chunk.byteLength <= remaining ? chunk : chunk.subarray(0, remaining);
+    outBytes.set(toCopy, cursor);
+    cursor += toCopy.byteLength;
+    remaining -= toCopy.byteLength;
+  }
+
+  const durationSeconds = byteRate > 0 ? alignedPcmBytes / byteRate : 0;
+  return { wavBuffer, durationSeconds };
+}
