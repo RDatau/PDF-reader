@@ -1,0 +1,10 @@
+{
+  "name": "VOXReader",
+  "description": "VOXReader: Aplikasi pembaca PDF Windows modern berbasis Electron dengan Gemini AI, TTS suara alami, mode malam, dan analisis dokumen offline.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
