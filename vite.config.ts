@@ -23,7 +23,7 @@ export default defineConfig(({ command }) => {
         ],
         manifest: {
           id: '/',
-          name: 'BH2390: PDF Reader & Voice Assistant',
+          name: 'PDF Reader & Voice Assistant',
           short_name: 'PDF Reader',
           description: 'View and read aloud PDF documents with offline storage, night mode, Gemini Flash TTS, and real-time voice conversations.',
           theme_color: '#0F1115',
