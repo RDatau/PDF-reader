@@ -31,6 +31,7 @@ import {
   Cpu,
   Headphones,
   FileAudio,
+  Globe,
 } from "lucide-react";
 import { ReadingTheme, TtsEngine, AppearanceSettings, GeminiTtsModelId } from "../types";
 import { FONT_OPTIONS } from "../lib/themePresets";
@@ -82,6 +83,10 @@ interface ToolbarProps {
   onOpenTtsSettings?: () => void;
   onOpenTtsLibrary?: () => void;
   ttsClipsCount?: number;
+  readerSource?: "pdf" | "article";
+  onOpenWebArticleClick?: () => void;
+  onSwitchBackToPdf?: () => void;
+  hasLoadedPdf?: boolean;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
@@ -129,7 +134,12 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onOpenTtsSettings,
   onOpenTtsLibrary,
   ttsClipsCount = 0,
+  readerSource = "pdf",
+  onOpenWebArticleClick,
+  onSwitchBackToPdf,
+  hasLoadedPdf = false,
 }) => {
+  const isArticleMode = readerSource === "article";
   const [showMobileMoreMenu, setShowMobileMoreMenu] = useState(false);
   const [showJumpModal, setShowJumpModal] = useState(false);
   const [jumpPageInput, setJumpPageInput] = useState(String(currentPage));
@@ -190,49 +200,67 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       >
         {/* Left Group: Navigation & Views */}
         <div className="flex items-center gap-1 sm:gap-2">
-          {/* Toggle Thumbnails */}
-          <button
-            id="btn-toggle-thumbnails"
-            onClick={onToggleThumbnails}
-            className={`p-1.5 rounded transition-colors cursor-pointer ${
-              showThumbnails
-                ? "bg-blue-600 text-white font-semibold"
-                : "hover:bg-[#1F2937] text-gray-400 hover:text-gray-200"
-            }`}
-            title="Page Thumbnails"
-          >
-            <LayoutGrid className="w-3.5 h-3.5" />
-          </button>
+          {!isArticleMode ? (
+            <>
+              {/* Toggle Thumbnails */}
+              <button
+                id="btn-toggle-thumbnails"
+                onClick={onToggleThumbnails}
+                className={`p-1.5 rounded transition-colors cursor-pointer ${
+                  showThumbnails
+                    ? "bg-blue-600 text-white font-semibold"
+                    : "hover:bg-[#1F2937] text-gray-400 hover:text-gray-200"
+                }`}
+                title="Page Thumbnails"
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+              </button>
 
-          {/* Toggle Outline / TOC */}
-          <button
-            id="btn-toggle-outline"
-            onClick={onToggleOutline}
-            className={`p-1.5 rounded transition-colors cursor-pointer ${
-              showOutline
-                ? "bg-blue-600 text-white font-semibold"
-                : "hover:bg-[#1F2937] text-gray-400 hover:text-gray-200"
-            }`}
-            title="Table of Contents / Bookmarks"
-          >
-            <ListTree className="w-3.5 h-3.5" />
-          </button>
+              {/* Toggle Outline / TOC */}
+              <button
+                id="btn-toggle-outline"
+                onClick={onToggleOutline}
+                className={`p-1.5 rounded transition-colors cursor-pointer ${
+                  showOutline
+                    ? "bg-blue-600 text-white font-semibold"
+                    : "hover:bg-[#1F2937] text-gray-400 hover:text-gray-200"
+                }`}
+                title="Table of Contents / Bookmarks"
+              >
+                <ListTree className="w-3.5 h-3.5" />
+              </button>
 
-          {/* Toggle Search */}
-          <button
-            id="btn-toggle-search"
-            onClick={onToggleSearch}
-            className={`p-1.5 rounded transition-colors cursor-pointer ${
-              showSearch
-                ? "bg-blue-600 text-white font-semibold"
-                : "hover:bg-[#1F2937] text-gray-400 hover:text-gray-200"
-            }`}
-            title="Search in Document (Ctrl+F)"
-          >
-            <Search className="w-3.5 h-3.5" />
-          </button>
+              {/* Toggle Search */}
+              <button
+                id="btn-toggle-search"
+                onClick={onToggleSearch}
+                className={`p-1.5 rounded transition-colors cursor-pointer ${
+                  showSearch
+                    ? "bg-blue-600 text-white font-semibold"
+                    : "hover:bg-[#1F2937] text-gray-400 hover:text-gray-200"
+                }`}
+                title="Search in Document (Ctrl+F)"
+              >
+                <Search className="w-3.5 h-3.5" />
+              </button>
 
-          <div className="h-5 w-px bg-[#1F2937] mx-0.5" />
+              <div className="h-5 w-px bg-[#1F2937] mx-0.5" />
+            </>
+          ) : (
+            <>
+              {hasLoadedPdf && onSwitchBackToPdf && (
+                <button
+                  onClick={onSwitchBackToPdf}
+                  className="px-2 py-1 rounded bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 text-blue-300 text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+                  title="Kembali membaca PDF"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span className="hidden lg:inline">Kembali PDF</span>
+                </button>
+              )}
+              <div className="h-5 w-px bg-[#1F2937] mx-0.5" />
+            </>
+          )}
 
           {/* Page Nav */}
           <div className="flex items-center gap-1">
@@ -466,29 +494,31 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
         {/* Right Group: Typography, Appearance Modal Trigger, & Zoom Controls */}
         <div className="flex items-center gap-1 sm:gap-1.5">
-          {/* Mode Teks (Reflow) / Halaman Asli Toggle */}
-          <button
-            id="btn-toolbar-toggle-viewmode"
-            onClick={handleToggleViewMode}
-            className={`flex items-center gap-1 px-2 py-1 rounded transition-colors cursor-pointer font-medium ${
-              appearance.viewMode === "text"
-                ? "bg-blue-600 text-white shadow-xs"
-                : "hover:bg-[#1F2937] text-gray-300 border border-[#2D333B]"
-            }`}
-            title={appearance.viewMode === "text" ? "Beralih ke Tampilan Halaman PDF Asli" : "Beralih ke Mode Baca Teks (Reflow E-Reader)"}
-          >
-            {appearance.viewMode === "text" ? (
-              <>
-                <FileText className="w-3.5 h-3.5" />
-                <span className="hidden lg:inline">Mode Teks</span>
-              </>
-            ) : (
-              <>
-                <BookOpen className="w-3.5 h-3.5 text-blue-400" />
-                <span className="hidden lg:inline">Reflow</span>
-              </>
-            )}
-          </button>
+          {/* Mode Teks (Reflow) / Halaman Asli Toggle (PDF only) */}
+          {!isArticleMode && (
+            <button
+              id="btn-toolbar-toggle-viewmode"
+              onClick={handleToggleViewMode}
+              className={`flex items-center gap-1 px-2 py-1 rounded transition-colors cursor-pointer font-medium ${
+                appearance.viewMode === "text"
+                  ? "bg-blue-600 text-white shadow-xs"
+                  : "hover:bg-[#1F2937] text-gray-300 border border-[#2D333B]"
+              }`}
+              title={appearance.viewMode === "text" ? "Beralih ke Tampilan Halaman PDF Asli" : "Beralih ke Mode Baca Teks (Reflow E-Reader)"}
+            >
+              {appearance.viewMode === "text" ? (
+                <>
+                  <FileText className="w-3.5 h-3.5" />
+                  <span className="hidden lg:inline">Mode Teks</span>
+                </>
+              ) : (
+                <>
+                  <BookOpen className="w-3.5 h-3.5 text-blue-400" />
+                  <span className="hidden lg:inline">Reflow</span>
+                </>
+              )}
+            </button>
+          )}
 
           {/* Font Family Selector Dropdown */}
           <div
@@ -538,8 +568,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             </button>
           </div>
 
-          {/* If in Dark Mode: Quick toggle for Inverted Dark Paper vs Original White Paper */}
-          {isDark && (
+          {/* If in Dark Mode: Quick toggle for Inverted Dark Paper vs Original White Paper (PDF only) */}
+          {!isArticleMode && isDark && (
             <button
               id="btn-toolbar-toggle-paper"
               onClick={handleToggleInvertPaper}
@@ -579,64 +609,68 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             <span>Tema & Warna</span>
           </button>
 
-          <div className="h-4 w-px bg-[#1F2937] mx-0.5" />
+          {!isArticleMode && (
+            <>
+              <div className="h-4 w-px bg-[#1F2937] mx-0.5" />
 
-          {/* Zoom Out */}
-          <button
-            id="btn-zoom-out"
-            disabled={zoom <= 0.4}
-            onClick={() => onZoomChange(Math.max(0.4, zoom - 0.15))}
-            className="p-1 rounded hover:bg-[#1F2937] text-gray-400 hover:text-gray-200 disabled:opacity-30 transition-colors cursor-pointer"
-            title="Zoom Out"
-          >
-            <ZoomOut className="w-3.5 h-3.5" />
-          </button>
+              {/* Zoom Out */}
+              <button
+                id="btn-zoom-out"
+                disabled={zoom <= 0.4}
+                onClick={() => onZoomChange(Math.max(0.4, zoom - 0.15))}
+                className="p-1 rounded hover:bg-[#1F2937] text-gray-400 hover:text-gray-200 disabled:opacity-30 transition-colors cursor-pointer"
+                title="Zoom Out"
+              >
+                <ZoomOut className="w-3.5 h-3.5" />
+              </button>
 
-          {/* Zoom display & dropdown */}
-          <select
-            id="select-zoom"
-            value={zoom}
-            onChange={(e) => onZoomChange(parseFloat(e.target.value))}
-            className="text-xs py-0.5 px-1 rounded border border-[#1F2937] bg-[#0F1115] text-gray-300 font-mono font-medium focus:outline-hidden focus:border-blue-500 cursor-pointer"
-          >
-            <option value="0.5">50%</option>
-            <option value="0.75">75%</option>
-            <option value="1.0">100%</option>
-            <option value="1.25">125%</option>
-            <option value="1.5">150%</option>
-            <option value="2.0">200%</option>
-          </select>
+              {/* Zoom display & dropdown */}
+              <select
+                id="select-zoom"
+                value={zoom}
+                onChange={(e) => onZoomChange(parseFloat(e.target.value))}
+                className="text-xs py-0.5 px-1 rounded border border-[#1F2937] bg-[#0F1115] text-gray-300 font-mono font-medium focus:outline-hidden focus:border-blue-500 cursor-pointer"
+              >
+                <option value="0.5">50%</option>
+                <option value="0.75">75%</option>
+                <option value="1.0">100%</option>
+                <option value="1.25">125%</option>
+                <option value="1.5">150%</option>
+                <option value="2.0">200%</option>
+              </select>
 
-          {/* Zoom In */}
-          <button
-            id="btn-zoom-in"
-            disabled={zoom >= 3.0}
-            onClick={() => onZoomChange(Math.min(3.0, zoom + 0.15))}
-            className="p-1 rounded hover:bg-[#1F2937] text-gray-400 hover:text-gray-200 disabled:opacity-30 transition-colors cursor-pointer"
-            title="Zoom In"
-          >
-            <ZoomIn className="w-3.5 h-3.5" />
-          </button>
+              {/* Zoom In */}
+              <button
+                id="btn-zoom-in"
+                disabled={zoom >= 3.0}
+                onClick={() => onZoomChange(Math.min(3.0, zoom + 0.15))}
+                className="p-1 rounded hover:bg-[#1F2937] text-gray-400 hover:text-gray-200 disabled:opacity-30 transition-colors cursor-pointer"
+                title="Zoom In"
+              >
+                <ZoomIn className="w-3.5 h-3.5" />
+              </button>
 
-          {/* Fit Width */}
-          <button
-            id="btn-fit-width"
-            onClick={onFitWidth}
-            className="px-2 py-0.5 rounded hover:bg-[#1F2937] text-gray-300 text-[11px] font-medium border border-[#2D333B] cursor-pointer"
-            title="Fit Page to Width"
-          >
-            Fit Width
-          </button>
+              {/* Fit Width */}
+              <button
+                id="btn-fit-width"
+                onClick={onFitWidth}
+                className="px-2 py-0.5 rounded hover:bg-[#1F2937] text-gray-300 text-[11px] font-medium border border-[#2D333B] cursor-pointer"
+                title="Fit Page to Width"
+              >
+                Fit Width
+              </button>
 
-          {/* Rotate Page */}
-          <button
-            id="btn-rotate"
-            onClick={onRotate}
-            className="p-1 rounded hover:bg-[#1F2937] text-gray-400 hover:text-gray-200 cursor-pointer"
-            title="Rotate 90 degrees"
-          >
-            <RotateCw className="w-3.5 h-3.5" />
-          </button>
+              {/* Rotate Page */}
+              <button
+                id="btn-rotate"
+                onClick={onRotate}
+                className="p-1 rounded hover:bg-[#1F2937] text-gray-400 hover:text-gray-200 cursor-pointer"
+                title="Rotate 90 degrees"
+              >
+                <RotateCw className="w-3.5 h-3.5" />
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -743,13 +777,41 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               </button>
             </div>
 
+            {onOpenWebArticleClick && (
+              <div className="p-3 rounded-xl bg-emerald-950/30 border border-emerald-500/30 flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-7 h-7 rounded-lg bg-emerald-600/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                    <Globe className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-semibold text-gray-200 block">
+                      Mode Baca Artikel Situs
+                    </span>
+                    <span className="text-[10px] text-emerald-300/80">
+                      Buka berita/blog bersih bebas iklan
+                    </span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setShowMobileMoreMenu(false);
+                    onOpenWebArticleClick();
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  Buka URL
+                </button>
+              </div>
+            )}
+
             <div className="grid grid-cols-3 gap-2">
               <button
                 onClick={() => {
                   onToggleSearch();
                   setShowMobileMoreMenu(false);
                 }}
-                className="p-3 rounded-xl bg-[#1A1F29] border border-[#252B36] flex flex-col items-center gap-1.5 text-gray-200"
+                disabled={isArticleMode}
+                className="p-3 rounded-xl bg-[#1A1F29] border border-[#252B36] flex flex-col items-center gap-1.5 text-gray-200 disabled:opacity-40"
               >
                 <Search className="w-5 h-5 text-blue-400" />
                 <span className="text-[11px] font-medium">Cari Teks</span>
@@ -760,7 +822,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                   onToggleOutline();
                   setShowMobileMoreMenu(false);
                 }}
-                className="p-3 rounded-xl bg-[#1A1F29] border border-[#252B36] flex flex-col items-center gap-1.5 text-gray-200"
+                disabled={isArticleMode}
+                className="p-3 rounded-xl bg-[#1A1F29] border border-[#252B36] flex flex-col items-center gap-1.5 text-gray-200 disabled:opacity-40"
               >
                 <ListTree className="w-5 h-5 text-indigo-400" />
                 <span className="text-[11px] font-medium">Daftar Isi</span>
@@ -771,7 +834,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                   onToggleThumbnails();
                   setShowMobileMoreMenu(false);
                 }}
-                className="p-3 rounded-xl bg-[#1A1F29] border border-[#252B36] flex flex-col items-center gap-1.5 text-gray-200"
+                disabled={isArticleMode}
+                className="p-3 rounded-xl bg-[#1A1F29] border border-[#252B36] flex flex-col items-center gap-1.5 text-gray-200 disabled:opacity-40"
               >
                 <LayoutGrid className="w-5 h-5 text-purple-400" />
                 <span className="text-[11px] font-medium">Miniatur</span>
@@ -799,7 +863,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                   onRotate();
                   setShowMobileMoreMenu(false);
                 }}
-                className="p-3 rounded-xl bg-[#1A1F29] border border-[#252B36] flex flex-col items-center gap-1.5 text-gray-200"
+                disabled={isArticleMode}
+                className="p-3 rounded-xl bg-[#1A1F29] border border-[#252B36] flex flex-col items-center gap-1.5 text-gray-200 disabled:opacity-40"
               >
                 <RotateCw className="w-5 h-5 text-amber-400" />
                 <span className="text-[11px] font-medium">Putar 90°</span>

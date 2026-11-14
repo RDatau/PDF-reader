@@ -14,6 +14,8 @@ import { TtsSettingsModal } from "./components/TtsSettingsModal";
 import { TtsLibraryModal } from "./components/TtsLibraryModal";
 import { GeminiSettingsModal } from "./components/GeminiSettingsModal";
 import { OfflineIndicator } from "./components/OfflineIndicator";
+import { WebArticleModal } from "./components/WebArticleModal";
+import { ArticleReaderView } from "./components/ArticleReaderView";
 import {
   ReadingTheme,
   StoredDocument,
@@ -22,6 +24,8 @@ import {
   GeminiTtsModelId,
   TtsFilterSettings,
   StoredTtsAudioMeta,
+  StoredArticle,
+  StoredArticleMeta,
 } from "./types";
 import {
   saveDocument,
@@ -39,6 +43,12 @@ import {
   mergePageWavClips,
   saveTtsClip,
 } from "./lib/ttsAudioStorage";
+import {
+  deleteArticle,
+  getAllArticles,
+  paginateArticleBlocks,
+  updateArticleProgress,
+} from "./lib/articleStorage";
 import { generateSamplePdfArrayBuffer } from "./lib/samplePdf";
 import {
   OfflineSpeechPlayer,
@@ -118,7 +128,25 @@ export default function App() {
     return saved ? parseFloat(saved) : 0;
   });
 
-  // Document state
+  // Document & Web Article state
+  const [readerSource, setReaderSource] = useState<"pdf" | "article">("pdf");
+  const [activeArticle, setActiveArticle] = useState<StoredArticle | null>(null);
+  const [savedArticlesList, setSavedArticlesList] = useState<StoredArticleMeta[]>([]);
+  const [isWebArticleModalOpen, setIsWebArticleModalOpen] = useState<boolean>(false);
+  const activePdfMetaRef = useRef<{
+    id: string;
+    name: string;
+    lastPage: number;
+    totalPages: number;
+    bookmarks: number[];
+  }>({
+    id: "sample-doc-1",
+    name: "The Art of Deep Reading.pdf",
+    lastPage: 1,
+    totalPages: 4,
+    bookmarks: [],
+  });
+
   const [currentDocId, setCurrentDocId] = useState<string>("sample-doc-1");
   const [currentDocName, setCurrentDocName] = useState<string>("The Art of Deep Reading.pdf");
   const [pdfData, setPdfData] = useState<ArrayBuffer | null>(null);
@@ -287,6 +315,15 @@ export default function App() {
     }
   };
 
+  const refreshArticlesList = async () => {
+    try {
+      const articles = await getAllArticles();
+      setSavedArticlesList(articles);
+    } catch (err) {
+      console.warn("Failed to load saved web articles:", err);
+    }
+  };
+
   // Load Library & Initial Document on Mount
   useEffect(() => {
     let isCancelled = false;
@@ -295,6 +332,12 @@ export default function App() {
         getAllTtsClipsMeta()
           .then((clips) => {
             if (!isCancelled) setTtsClipsList(clips);
+          })
+          .catch(() => {});
+
+        getAllArticles()
+          .then((articles) => {
+            if (!isCancelled) setSavedArticlesList(articles);
           })
           .catch(() => {});
 
@@ -310,6 +353,14 @@ export default function App() {
           if (fullDoc && fullDoc.data) {
             const normalizedBuffer = toCleanArrayBuffer(fullDoc.data);
             if (normalizedBuffer && normalizedBuffer.byteLength > 0) {
+              activePdfMetaRef.current = {
+                id: fullDoc.id,
+                name: fullDoc.name,
+                lastPage: fullDoc.lastPage || 1,
+                totalPages: fullDoc.totalPages || 1,
+                bookmarks: fullDoc.bookmarks || [],
+              };
+              setReaderSource("pdf");
               setCurrentDocId(fullDoc.id);
               setCurrentDocName(fullDoc.name);
               setPdfData(normalizedBuffer);
@@ -360,6 +411,14 @@ export default function App() {
       console.warn("Could not save sample doc into IndexedDB:", e);
     }
 
+    activePdfMetaRef.current = {
+      id: sampleDoc.id,
+      name: sampleDoc.name,
+      lastPage: 1,
+      totalPages: 4,
+      bookmarks: [1],
+    };
+    setReaderSource("pdf");
     setCurrentDocId(sampleDoc.id);
     setCurrentDocName(sampleDoc.name);
     setPdfData(sampleBuffer.slice(0));
@@ -396,7 +455,8 @@ export default function App() {
           return;
         }
         setPdfDoc(doc);
-        setTotalPages(doc.numPages);
+        activePdfMetaRef.current.totalPages = doc.numPages;
+        setTotalPages((prev) => (readerSource === "pdf" ? doc.numPages : prev));
         setIsDocLoading(false);
       })
       .catch((err) => {
@@ -415,12 +475,30 @@ export default function App() {
     };
   }, [pdfData]);
 
-  // Persist reading progress
+  // Persist reading progress (PDF vs Web Article separately)
   useEffect(() => {
+    if (readerSource === "article") {
+      if (activeArticle) {
+        updateArticleProgress(activeArticle.id, currentPage, bookmarks)
+          .then(() => {
+            void refreshArticlesList();
+          })
+          .catch(() => {});
+      }
+      return;
+    }
+
     if (currentDocId && pdfData && pdfData.byteLength > 0) {
+      activePdfMetaRef.current = {
+        ...activePdfMetaRef.current,
+        id: currentDocId,
+        name: currentDocName,
+        lastPage: currentPage,
+        bookmarks,
+      };
       updateProgress(currentDocId, currentPage, zoom, bookmarks).catch(() => {});
     }
-  }, [currentDocId, currentPage, zoom, bookmarks, pdfData]);
+  }, [readerSource, activeArticle, currentDocId, currentDocName, currentPage, zoom, bookmarks, pdfData]);
 
   // Central PDF buffer loader
   const loadPdfBuffer = async (name: string, rawBuffer: ArrayBuffer | Uint8Array | unknown) => {
@@ -454,6 +532,14 @@ export default function App() {
     // Stop any current reading
     handleStopSpeaking();
 
+    activePdfMetaRef.current = {
+      id: newDoc.id,
+      name: newDoc.name,
+      lastPage: 1,
+      totalPages: 1,
+      bookmarks: [],
+    };
+    setReaderSource("pdf");
     setCurrentDocId(newDoc.id);
     setCurrentDocName(newDoc.name);
     setPdfData(cleanBuffer.slice(0));
@@ -601,6 +687,14 @@ export default function App() {
     handleStopSpeaking();
     const doc = await getDocumentById(id);
     if (doc && doc.data && doc.data.byteLength > 0) {
+      activePdfMetaRef.current = {
+        id: doc.id,
+        name: doc.name,
+        lastPage: doc.lastPage || 1,
+        totalPages: doc.totalPages || 1,
+        bookmarks: doc.bookmarks || [],
+      };
+      setReaderSource("pdf");
       setCurrentDocId(doc.id);
       setCurrentDocName(doc.name);
       setPdfData(doc.data.slice(0));
@@ -614,12 +708,55 @@ export default function App() {
     await deleteDocument(id);
     const list = await getAllDocuments();
     setDocumentsList(list);
-    if (currentDocId === id) {
+    if (activePdfMetaRef.current.id === id || currentDocId === id) {
       if (list.length > 0) {
         handleSelectDocumentFromLibrary(list[0].id);
       } else {
         loadSampleDocument();
       }
+    }
+  };
+
+  const handleOpenArticle = (article: StoredArticle) => {
+    handleStopSpeaking();
+    setShowThumbnails(false);
+    setShowOutline(false);
+    setShowSearch(false);
+    setSelectedSnippet("");
+
+    const articlePages = paginateArticleBlocks(article.blocks);
+    const safePage = Math.max(1, Math.min(articlePages.length, article.lastPage || 1));
+
+    setActiveArticle(article);
+    setReaderSource("article");
+    setCurrentDocId(article.id);
+    setCurrentDocName(article.title);
+    setTotalPages(articlePages.length);
+    setCurrentPage(safePage);
+    setBookmarks(article.bookmarks || []);
+    void refreshArticlesList();
+  };
+
+  const handleSwitchBackToPdf = () => {
+    handleStopSpeaking();
+    setSelectedSnippet("");
+    setReaderSource("pdf");
+
+    const meta = activePdfMetaRef.current;
+    const restoredTotal = pdfDoc?.numPages || meta.totalPages || 1;
+    setCurrentDocId(meta.id);
+    setCurrentDocName(meta.name);
+    setTotalPages(restoredTotal);
+    setCurrentPage(Math.max(1, Math.min(restoredTotal, meta.lastPage || 1)));
+    setBookmarks(meta.bookmarks || []);
+  };
+
+  const handleDeleteArticle = async (id: string) => {
+    await deleteArticle(id);
+    await refreshArticlesList();
+    if (readerSource === "article" && activeArticle?.id === id) {
+      setActiveArticle(null);
+      handleSwitchBackToPdf();
     }
   };
 
@@ -1070,6 +1207,14 @@ export default function App() {
         setDocumentsList(list);
 
         handleStopSpeaking();
+        activePdfMetaRef.current = {
+          id: newDoc.id,
+          name: newDoc.name,
+          lastPage: 1,
+          totalPages: 1,
+          bookmarks: [],
+        };
+        setReaderSource("pdf");
         setCurrentDocId(newDoc.id);
         setCurrentDocName(newDoc.name);
         setPdfData(buffer.slice(0));
@@ -1127,6 +1272,9 @@ export default function App() {
         onOpenLiveVoice={() => setIsLiveVoiceOpen(true)}
         onOpenAiChat={() => setIsAiChatOpen(true)}
         libraryCount={documentsList.length}
+        readerSource={readerSource}
+        onOpenWebArticleClick={() => setIsWebArticleModalOpen(true)}
+        articleCount={savedArticlesList.length}
       />
 
       {/* Toolbar */}
@@ -1190,6 +1338,10 @@ export default function App() {
         onReadSelectedText={() => handleReadSelectedText(selectedSnippet)}
         geminiQuotaReached={geminiQuotaReached}
         hasStyleInstruction={Boolean(styleInstruction.trim())}
+        readerSource={readerSource}
+        onOpenWebArticleClick={() => setIsWebArticleModalOpen(true)}
+        onSwitchBackToPdf={handleSwitchBackToPdf}
+        hasLoadedPdf={Boolean(pdfData)}
       />
 
       {/* TTS Error / Quota notification banner (no offline fallback) */}
@@ -1230,7 +1382,7 @@ export default function App() {
       {/* Main Workspace: Sidebars + PDF Canvas Stage + AI Assistant (with pb-14 for mobile bottom bar) */}
       <div className="flex-1 flex overflow-hidden relative pb-13 sm:pb-0">
         {/* Mobile Backdrop for Sidebars */}
-        {(showThumbnails || showOutline || showSearch) && (
+        {readerSource === "pdf" && (showThumbnails || showOutline || showSearch) && (
           <div
             className="sm:hidden fixed inset-0 z-35 bg-black/60 backdrop-blur-xs"
             onClick={() => {
@@ -1242,7 +1394,7 @@ export default function App() {
         )}
 
         {/* Thumbnails Sidebar */}
-        {showThumbnails && (
+        {readerSource === "pdf" && showThumbnails && (
           <ThumbnailsSidebar
             pdfDoc={pdfDoc}
             totalPages={totalPages}
@@ -1258,7 +1410,7 @@ export default function App() {
         )}
 
         {/* Outline / Bookmarks Sidebar */}
-        {showOutline && (
+        {readerSource === "pdf" && showOutline && (
           <OutlineSidebar
             pdfDoc={pdfDoc}
             currentPage={currentPage}
@@ -1276,44 +1428,74 @@ export default function App() {
           />
         )}
 
-        {/* Central PDF Viewer Canvas */}
-        <PdfViewer
-          pdfDoc={pdfDoc}
-          docTitle={currentDocName}
-          isLoading={isDocLoading}
-          error={docError}
-          currentPage={currentPage}
-          totalPages={totalPages}
-          onPageChange={(page) => {
-            handleStopSpeaking();
-            setCurrentPage(page);
-          }}
-          zoom={zoom}
-          rotation={rotation}
-          theme={theme}
-          appearance={appearance}
-          onAppearanceChange={handleAppearanceChange}
-          onOpenAppearanceModal={() => setIsAppearanceOpen(true)}
-          dimmerLevel={dimmerLevel}
-          onPageTextExtracted={setPageText}
-          onPageTtsTextExtracted={(filteredText, filteredHeaders) => {
-            setTtsPageText(filteredText);
-            setFilteredTtsHeaders(filteredHeaders);
-          }}
-          ttsFilterSettings={ttsFilterSettings}
-          activeReadingSentence={activeReadingSentence}
-          onReadSelectedText={(snippet) => {
-            setSelectedSnippet(snippet);
-            handleReadSelectedText(snippet);
-          }}
-          onAskAiAboutText={handleAskAiAboutText}
-          onStopSpeaking={handleStopSpeaking}
-          onOpenOtherPdf={handleOpenPdf}
-          onLoadSamplePdf={loadSampleDocument}
-        />
+        {/* Central Reader Stage: Web Article Clean Reader Mode vs PDF Viewer */}
+        {readerSource === "article" && activeArticle ? (
+          <ArticleReaderView
+            article={activeArticle}
+            currentPage={currentPage}
+            onPageChange={(page) => {
+              handleStopSpeaking();
+              setCurrentPage(page);
+            }}
+            appearance={appearance}
+            onAppearanceChange={handleAppearanceChange}
+            onOpenAppearanceModal={() => setIsAppearanceOpen(true)}
+            dimmerLevel={dimmerLevel}
+            onPageTextExtracted={setPageText}
+            onPageTtsTextExtracted={(filteredText, filteredHeaders) => {
+              setTtsPageText(filteredText);
+              setFilteredTtsHeaders(filteredHeaders);
+            }}
+            activeReadingSentence={activeReadingSentence}
+            onReadSelectedText={(snippet) => {
+              setSelectedSnippet(snippet);
+              handleReadSelectedText(snippet);
+            }}
+            onAskAiAboutText={handleAskAiAboutText}
+            onStopSpeaking={handleStopSpeaking}
+            onOpenWebArticleModal={() => setIsWebArticleModalOpen(true)}
+            onSwitchBackToPdf={handleSwitchBackToPdf}
+            hasLoadedPdf={Boolean(pdfData)}
+          />
+        ) : (
+          <PdfViewer
+            pdfDoc={pdfDoc}
+            docTitle={currentDocName}
+            isLoading={isDocLoading}
+            error={docError}
+            currentPage={currentPage}
+            totalPages={totalPages}
+            onPageChange={(page) => {
+              handleStopSpeaking();
+              setCurrentPage(page);
+            }}
+            zoom={zoom}
+            rotation={rotation}
+            theme={theme}
+            appearance={appearance}
+            onAppearanceChange={handleAppearanceChange}
+            onOpenAppearanceModal={() => setIsAppearanceOpen(true)}
+            dimmerLevel={dimmerLevel}
+            onPageTextExtracted={setPageText}
+            onPageTtsTextExtracted={(filteredText, filteredHeaders) => {
+              setTtsPageText(filteredText);
+              setFilteredTtsHeaders(filteredHeaders);
+            }}
+            ttsFilterSettings={ttsFilterSettings}
+            activeReadingSentence={activeReadingSentence}
+            onReadSelectedText={(snippet) => {
+              setSelectedSnippet(snippet);
+              handleReadSelectedText(snippet);
+            }}
+            onAskAiAboutText={handleAskAiAboutText}
+            onStopSpeaking={handleStopSpeaking}
+            onOpenOtherPdf={handleOpenPdf}
+            onLoadSamplePdf={loadSampleDocument}
+          />
+        )}
 
         {/* In-Document Search Panel */}
-        {showSearch && (
+        {readerSource === "pdf" && showSearch && (
           <SearchPanel
             pdfDoc={pdfDoc}
             totalPages={totalPages}
@@ -1409,6 +1591,20 @@ export default function App() {
         onSelectDoc={handleSelectDocumentFromLibrary}
         onDeleteDoc={handleDeleteDocument}
         onUploadClick={() => fileInputRef.current?.click()}
+      />
+
+      {/* Web Article Reader Mode Modal */}
+      <WebArticleModal
+        isOpen={isWebArticleModalOpen}
+        onClose={() => setIsWebArticleModalOpen(false)}
+        savedArticles={savedArticlesList}
+        activeArticleId={activeArticle?.id || null}
+        readerSource={readerSource}
+        hasLoadedPdf={Boolean(pdfData)}
+        onOpenArticle={handleOpenArticle}
+        onDeleteArticle={handleDeleteArticle}
+        onRefreshArticles={refreshArticlesList}
+        onSwitchBackToPdf={handleSwitchBackToPdf}
       />
 
       {/* Gemini Settings Modal */}

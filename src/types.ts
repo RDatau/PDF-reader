@@ -77,6 +77,34 @@ export interface StoredTtsAudio {
 
 export type StoredTtsAudioMeta = Omit<StoredTtsAudio, "audioData">;
 
+export type ArticleBlock =
+  | { type: "heading"; level: 1 | 2 | 3 | 4; text: string }
+  | { type: "paragraph"; text: string }
+  | { type: "blockquote"; text: string }
+  | { type: "list"; ordered: boolean; items: string[] }
+  | { type: "image"; src: string; alt?: string };
+
+export interface StoredArticle {
+  id: string;
+  url: string;
+  domain: string;
+  title: string;
+  byline?: string;
+  siteName?: string;
+  excerpt?: string;
+  publishedTime?: string;
+  wordCount: number;
+  readingMinutes: number;
+  blocks: ArticleBlock[];
+  plainText: string;
+  lastPage: number;
+  bookmarks: number[];
+  savedAt: number;
+  lastReadAt: number;
+}
+
+export type StoredArticleMeta = Omit<StoredArticle, "blocks" | "plainText">;
+
 export interface SearchMatch {
   pageNumber: number;
   matchIndex: number;

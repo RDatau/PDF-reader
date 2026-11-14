@@ -11,6 +11,7 @@ import {
   Mic,
   Palette,
   Settings,
+  Globe,
 } from "lucide-react";
 import { ReadingTheme, AppearanceSettings } from "../types";
 
@@ -29,6 +30,9 @@ interface HeaderProps {
   onOpenLiveVoice: () => void;
   onOpenAiChat: () => void;
   libraryCount: number;
+  readerSource?: "pdf" | "article";
+  onOpenWebArticleClick?: () => void;
+  articleCount?: number;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -46,6 +50,9 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenLiveVoice,
   onOpenAiChat,
   libraryCount,
+  readerSource = "pdf",
+  onOpenWebArticleClick,
+  articleCount = 0,
 }) => {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [showDimmerMenu, setShowDimmerMenu] = useState(false);
@@ -86,7 +93,11 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="h-4 w-px bg-[#1F2937] mx-0.5 hidden sm:block" />
 
         <div className="flex items-center gap-1.5 min-w-0 max-w-[130px] sm:max-w-xs md:max-w-md">
-          <FileText className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+          {readerSource === "article" ? (
+            <Globe className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          ) : (
+            <FileText className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+          )}
           <span
             className="text-[11px] sm:text-xs font-medium text-gray-300 truncate font-mono"
             title={currentDocName || "Tidak ada dokumen"}
@@ -133,6 +144,28 @@ export const Header: React.FC<HeaderProps> = ({
         >
           Contoh
         </button>
+
+        {/* Web Article Reader Mode Button */}
+        {onOpenWebArticleClick && (
+          <button
+            id="btn-open-web-article"
+            onClick={onOpenWebArticleClick}
+            className={`relative text-xs px-2 sm:px-2.5 py-1.5 rounded border transition-colors flex items-center gap-1 cursor-pointer ${
+              readerSource === "article"
+                ? "bg-emerald-600/25 border-emerald-500/60 text-emerald-300 font-semibold"
+                : "bg-[#1F2937] hover:bg-[#2D333B] border-emerald-500/30 text-emerald-300"
+            }`}
+            title="Buka Artikel Situs dalam Mode Baca Bebas Iklan"
+          >
+            <Globe className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden sm:inline">Baca Artikel</span>
+            {articleCount > 0 && (
+              <span className="px-1.5 py-0.2 rounded-full bg-emerald-600/30 text-emerald-300 text-[10px] font-mono font-bold">
+                {articleCount}
+              </span>
+            )}
+          </button>
+        )}
 
         {/* Library Modal Trigger */}
         <button
