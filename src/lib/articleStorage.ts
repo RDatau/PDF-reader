@@ -132,11 +132,21 @@ export async function fetchCleanArticleFromUrl(rawUrl: string): Promise<StoredAr
     body: JSON.stringify({ url: normalizedInput }),
   });
 
-  const data = await res.json().catch(() => ({}));
+  const rawText = await res.text().catch(() => "");
+  let data: any = {};
+  try {
+    data = rawText ? JSON.parse(rawText) : {};
+  } catch {
+    data = {};
+  }
+
   if (!res.ok || !data?.ok || !data?.article) {
+    const textHint = !data?.error && rawText && !rawText.trim().startsWith("<")
+      ? ` — ${rawText.trim().slice(0, 140)}`
+      : "";
     throw new Error(
       data?.error ||
-        `Gagal membuka artikel (${res.status}). Pastikan URL dapat diakses publik.`
+        `Gagal membuka artikel (${res.status})${textHint}. Pastikan URL dapat diakses publik.`
     );
   }
 
