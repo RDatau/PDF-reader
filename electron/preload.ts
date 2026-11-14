@@ -62,6 +62,12 @@ const electronAPI = {
   },
 
   // Utilities
+  fetchCleanArticle: async (
+    url: string
+  ): Promise<{ ok: boolean; article?: any; error?: string; status?: number }> => {
+    return await ipcRenderer.invoke("article:fetch", url);
+  },
+
   openExternal: (url: string) => {
     ipcRenderer.send("shell:open-external", url);
   },

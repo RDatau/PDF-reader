@@ -3,6 +3,7 @@ import path from "path";
 import fs from "fs";
 import http from "http";
 import https from "https";
+import { ArticleFetchError, extractCleanArticleFromUrl } from "../lib/articleExtractor";
 
 let mainWindow: BrowserWindow | null = null;
 let fileToOpenOnStartup: string | null = null;
@@ -243,6 +244,14 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false,
     },
+  });
+
+  // Open external http/https links (e.g. "Buka Situs Asli") in system browser
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url && (url.startsWith("http://") || url.startsWith("https://"))) {
+      shell.openExternal(url);
+    }
+    return { action: "deny" };
   });
 
   // F12 or Ctrl+Shift+I shortcut to toggle DevTools
@@ -522,6 +531,21 @@ function setupIpcHandlers() {
   // App details
   ipcMain.handle("app:get-version", () => app.getVersion());
   ipcMain.handle("app:get-platform", () => process.platform);
+
+  // Fetch & clean web article directly in Electron main process (no local server required)
+  ipcMain.handle("article:fetch", async (_event, rawUrl: string) => {
+    try {
+      const article = await extractCleanArticleFromUrl(rawUrl);
+      return { ok: true, article };
+    } catch (err: any) {
+      const status = err instanceof ArticleFetchError ? err.statusCode : 500;
+      return {
+        ok: false,
+        status,
+        error: err?.message || "Gagal memuat dan membersihkan artikel.",
+      };
+    }
+  });
 
   // Shell open external
   ipcMain.on("shell:open-external", (_event, url: string) => {

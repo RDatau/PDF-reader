@@ -125,32 +125,47 @@ export async function fetchCleanArticleFromUrl(rawUrl: string): Promise<StoredAr
 
   const normalizedInput = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 
-  const apiBase = getApiBaseUrl();
-  const res = await fetch(`${apiBase}/api/article/fetch`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url: normalizedInput }),
-  });
+  let payload: FetchedArticlePayload;
 
-  const rawText = await res.text().catch(() => "");
-  let data: any = {};
-  try {
-    data = rawText ? JSON.parse(rawText) : {};
-  } catch {
-    data = {};
+  if (typeof window !== "undefined" && window.electronAPI?.fetchCleanArticle) {
+    const ipcRes = await window.electronAPI.fetchCleanArticle(normalizedInput);
+    if (!ipcRes?.ok || !ipcRes?.article) {
+      throw new Error(
+        ipcRes?.error ||
+          "Gagal membuka artikel di aplikasi desktop. Pastikan URL valid dan dapat diakses publik."
+      );
+    }
+    payload = ipcRes.article as FetchedArticlePayload;
+  } else {
+    const apiBase = getApiBaseUrl();
+    const res = await fetch(`${apiBase}/api/article/fetch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: normalizedInput }),
+    });
+
+    const rawText = await res.text().catch(() => "");
+    let data: any = {};
+    try {
+      data = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      data = {};
+    }
+
+    if (!res.ok || !data?.ok || !data?.article) {
+      const textHint =
+        !data?.error && rawText && !rawText.trim().startsWith("<")
+          ? ` — ${rawText.trim().slice(0, 140)}`
+          : "";
+      throw new Error(
+        data?.error ||
+          `Gagal membuka artikel (${res.status})${textHint}. Pastikan URL dapat diakses publik.`
+      );
+    }
+
+    payload = data.article as FetchedArticlePayload;
   }
 
-  if (!res.ok || !data?.ok || !data?.article) {
-    const textHint = !data?.error && rawText && !rawText.trim().startsWith("<")
-      ? ` — ${rawText.trim().slice(0, 140)}`
-      : "";
-    throw new Error(
-      data?.error ||
-        `Gagal membuka artikel (${res.status})${textHint}. Pastikan URL dapat diakses publik.`
-    );
-  }
-
-  const payload = data.article as FetchedArticlePayload;
   const id = buildArticleIdFromUrl(payload.url || normalizedInput);
   const existing = await getArticleById(id).catch(() => undefined);
   const now = Date.now();

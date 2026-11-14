@@ -152,6 +152,9 @@ export interface ElectronAPI {
     callback: (payload: { name: string; path?: string; data: ArrayBuffer }) => void
   ) => () => void;
   onMenuTrigger: (channel: string, callback: () => void) => () => void;
+  fetchCleanArticle?: (
+    url: string
+  ) => Promise<{ ok: boolean; article?: any; error?: string; status?: number }>;
   openExternal: (url: string) => void;
   getVersion: () => Promise<string>;
   getPlatform: () => Promise<string>;
