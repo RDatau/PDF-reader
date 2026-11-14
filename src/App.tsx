@@ -1380,7 +1380,7 @@ export default function App() {
       )}
 
       {/* Main Workspace: Sidebars + PDF Canvas Stage + AI Assistant (with pb-14 for mobile bottom bar) */}
-      <div className="flex-1 flex overflow-hidden relative pb-13 sm:pb-0">
+      <div className="flex-1 min-h-0 flex overflow-hidden relative pb-13 sm:pb-0">
         {/* Mobile Backdrop for Sidebars */}
         {readerSource === "pdf" && (showThumbnails || showOutline || showSearch) && (
           <div
