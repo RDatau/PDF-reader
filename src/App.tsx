@@ -1446,6 +1446,7 @@ export default function App() {
               setTtsPageText(filteredText);
               setFilteredTtsHeaders(filteredHeaders);
             }}
+            ttsFilterSettings={ttsFilterSettings}
             activeReadingSentence={activeReadingSentence}
             onReadSelectedText={(snippet) => {
               setSelectedSnippet(snippet);

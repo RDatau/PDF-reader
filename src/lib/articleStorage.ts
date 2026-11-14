@@ -1,4 +1,4 @@
-import { ArticleBlock, StoredArticle, StoredArticleMeta } from "../types";
+import { ArticleBlock, StoredArticle, StoredArticleMeta, TtsFilterSettings } from "../types";
 import { getApiBaseUrl } from "./apiConfig";
 
 const DB_NAME = "voxreader_web_articles";
@@ -266,3 +266,207 @@ export function paginateArticleBlocks(
 
   return pages;
 }
+
+export interface ArticleTtsFilterResult {
+  plainText: string;
+  ttsText: string;
+  filteredHeaders: string[];
+}
+
+function normalizeArticleCompareText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u201C\u201D"']/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s\-–—:|•]+|[\s\-–—:|•.]+$/g, "")
+    .trim();
+}
+
+function isLikelyArticleMetadataLine(
+  text: string,
+  article: StoredArticle
+): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 140) return false;
+
+  const norm = normalizeArticleCompareText(trimmed);
+  if (!norm) return true;
+
+  const titleNorm = normalizeArticleCompareText(article.title || "");
+  const siteNorm = normalizeArticleCompareText(article.siteName || "");
+  const domainNorm = normalizeArticleCompareText(article.domain || "");
+  const bylineNorm = normalizeArticleCompareText(article.byline || "");
+
+  if (
+    titleNorm.length >= 4 &&
+    (norm === titleNorm ||
+      (norm.length <= titleNorm.length + 18 && titleNorm.includes(norm)) ||
+      (norm.length >= titleNorm.length && norm.includes(titleNorm) && norm.length <= titleNorm.length + 30))
+  ) {
+    return true;
+  }
+
+  if ((siteNorm && norm === siteNorm) || (domainNorm && norm === domainNorm)) {
+    return true;
+  }
+
+  if (
+    bylineNorm &&
+    (norm === bylineNorm ||
+      norm === `oleh ${bylineNorm}` ||
+      norm === `by ${bylineNorm}` ||
+      norm === `penulis ${bylineNorm}`)
+  ) {
+    return true;
+  }
+
+  // Common editorial header/byline/reading-time/UI labels
+  if (
+    /^(oleh|penulis|author|editor|reporter|pewarta|kontributor|foto|ilustrasi|sumber|tag|topik)\s*:/i.test(trimmed) ||
+    /^(oleh|by)\s+[a-zA-Z\u00C0-\u024F][\w\s.,'-]{1,50}$/i.test(trimmed) ||
+    /^~?\d+\s*(menit|mnt|min|minutes?)\s*(baca|read|waktu baca)?$/i.test(trimmed) ||
+    /^(buka situs asli|bagikan|share|iklan|advertisement|daftar isi)$/i.test(trimmed)
+  ) {
+    return true;
+  }
+
+  // Standalone publish date/time line (without full sentence punctuation)
+  const endsWithSentencePunct = /[.?!…]["”’)]*\s*$/.test(trimmed);
+  if (
+    !endsWithSentencePunct &&
+    trimmed.length <= 90 &&
+    (/\b(wib|wita|wit|gmt|utc)\b/i.test(trimmed) ||
+      (/\b(senin|selasa|rabu|kamis|jumat|sabtu|minggu|monday|tuesday|wednesday|thursday|friday|saturday|sunday|januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember|january|february|march|may|june|july|august|october|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b/i.test(
+        trimmed
+      ) &&
+        /\d{1,4}/.test(trimmed)))
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Builds filtered TTS text for the current article page slice while keeping
+ * full visual & AI Q&A text untouched.
+ */
+export function buildArticlePageTtsText(
+  article: StoredArticle,
+  slice: ArticlePageSlice | undefined,
+  filterSettings?: TtsFilterSettings
+): ArticleTtsFilterResult {
+  const fullText = slice?.plainText || article.plainText || "";
+  if (!slice || !slice.blocks || slice.blocks.length === 0) {
+    return {
+      plainText: fullText,
+      ttsText: fullText,
+      filteredHeaders: [],
+    };
+  }
+
+  const skipHeadersFooters = filterSettings?.skipHeadersFooters ?? true;
+  const skipChapterHeadings = filterSettings?.skipChapterHeadings ?? false;
+  const customIgnored = (filterSettings?.customIgnoredLines || [])
+    .map((s) => normalizeArticleCompareText(s))
+    .filter((s) => s.length > 0);
+
+  const isFirstPage = slice.pageNumber === 1;
+  const titleNorm = normalizeArticleCompareText(article.title || "");
+  const filteredHeaders: string[] = [];
+  const pushFilteredHeader = (label: string) => {
+    const clean = label.trim();
+    if (!clean) return;
+    if (!filteredHeaders.includes(clean)) {
+      filteredHeaders.push(clean);
+    }
+  };
+
+  // Page 1 header block (site name, reading time, article title, byline, date)
+  if (isFirstPage && skipHeadersFooters && article.title) {
+    pushFilteredHeader(article.title);
+  }
+
+  const keptParts: string[] = [];
+  let seenBodyParagraph = false;
+
+  for (const block of slice.blocks) {
+    const ttsBlockText = blockToTtsText(block).trim();
+    if (!ttsBlockText) continue;
+
+    const normBlock = normalizeArticleCompareText(ttsBlockText);
+
+    // 1. User-defined custom ignored phrases
+    if (
+      customIgnored.length > 0 &&
+      customIgnored.some((ig) => normBlock === ig || normBlock.includes(ig))
+    ) {
+      pushFilteredHeader(ttsBlockText);
+      continue;
+    }
+
+    // 2. Leading titles, subtitles, and metadata blocks at the top of Page 1
+    if (isFirstPage && skipHeadersFooters && !seenBodyParagraph) {
+      if (block.type === "heading") {
+        pushFilteredHeader(block.text);
+        continue;
+      }
+
+      if (
+        (block.type === "paragraph" || block.type === "blockquote") &&
+        isLikelyArticleMetadataLine(ttsBlockText, article)
+      ) {
+        pushFilteredHeader(ttsBlockText);
+        continue;
+      }
+
+      // Short non-sentence kicker/category tag right above the first body paragraph
+      if (
+        block.type === "paragraph" &&
+        ttsBlockText.length <= 65 &&
+        !/[.?!…:]["”’)]*\s*$/.test(ttsBlockText) &&
+        ttsBlockText.split(/\s+/).length <= 8 &&
+        !/[-–—]\s*$/.test(ttsBlockText)
+      ) {
+        pushFilteredHeader(ttsBlockText);
+        continue;
+      }
+    }
+
+    // 3. Duplicate article title appearing anywhere as a heading/short line
+    if (
+      skipHeadersFooters &&
+      titleNorm.length >= 4 &&
+      normBlock === titleNorm &&
+      (block.type === "heading" || ttsBlockText.length <= article.title.length + 20)
+    ) {
+      pushFilteredHeader(ttsBlockText);
+      continue;
+    }
+
+    // 4. Mid-article headings / subheadings when skipChapterHeadings is enabled
+    if (skipChapterHeadings && block.type === "heading") {
+      pushFilteredHeader(block.text);
+      continue;
+    }
+
+    seenBodyParagraph = true;
+    keptParts.push(ttsBlockText);
+  }
+
+  let ttsText = keptParts.join("\n\n").trim();
+
+  // Safety fallback if everything on a short page was filtered out
+  if (!ttsText) {
+    ttsText = fullText;
+  } else if (isFirstPage && !skipHeadersFooters && article.title) {
+    ttsText = `${article.title}.\n\n${ttsText}`;
+  }
+
+  return {
+    plainText: fullText,
+    ttsText,
+    filteredHeaders,
+  };
+}
+

@@ -564,10 +564,10 @@ export const TtsSettingsModal: React.FC<TtsSettingsModalProps> = ({
             >
               <div className="space-y-0.5">
                 <span className="text-xs font-semibold block text-gray-100">
-                  Saring Header, Judul Chapter & Nomor Halaman
+                  Saring Header, Judul Artikel/Chapter &amp; Nomor Halaman
                 </span>
                 <span className="text-[10px] text-gray-400 block leading-relaxed">
-                  Otomatis melewati judul PDF/chapter di margin atas (running header) serta nomor halaman di bawah agar tidak ikut dibacakan.
+                  Otomatis melewati judul utama &amp; metadata atas pada Artikel Situs (sumber, penulis, tanggal, subjudul pembuka), serta running header dan nomor halaman pada PDF.
                 </span>
               </div>
               <div
@@ -603,7 +603,7 @@ export const TtsSettingsModal: React.FC<TtsSettingsModalProps> = ({
                   Lewati Juga Judul Bab / Subjudul di Badan Halaman
                 </span>
                 <span className="text-[10px] text-gray-400 block leading-relaxed">
-                  Jika aktif, judul bab atau heading singkat di tengah halaman juga tidak akan dibacakan oleh TTS.
+                  Jika aktif, judul bab pada PDF maupun seluruh subjudul (heading) di tengah badan Artikel Situs juga tidak akan dibacakan oleh TTS.
                 </span>
               </div>
               <div

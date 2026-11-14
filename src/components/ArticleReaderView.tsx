@@ -19,9 +19,9 @@ import {
   FileText,
   Clock,
 } from "lucide-react";
-import { AppearanceSettings, StoredArticle } from "../types";
+import { AppearanceSettings, StoredArticle, TtsFilterSettings } from "../types";
 import { DARK_PRESETS, LIGHT_PRESETS, TEXT_TONES, FONT_OPTIONS } from "../lib/themePresets";
-import { paginateArticleBlocks } from "../lib/articleStorage";
+import { buildArticlePageTtsText, paginateArticleBlocks } from "../lib/articleStorage";
 
 interface ArticleReaderViewProps {
   article: StoredArticle;
@@ -33,6 +33,7 @@ interface ArticleReaderViewProps {
   dimmerLevel: number;
   onPageTextExtracted: (text: string) => void;
   onPageTtsTextExtracted: (filteredText: string, filteredHeaders: string[]) => void;
+  ttsFilterSettings?: TtsFilterSettings;
   activeReadingSentence?: string;
   onReadSelectedText: (text: string) => void;
   onAskAiAboutText: (text: string) => void;
@@ -52,6 +53,7 @@ export const ArticleReaderView: React.FC<ArticleReaderViewProps> = ({
   dimmerLevel,
   onPageTextExtracted,
   onPageTtsTextExtracted,
+  ttsFilterSettings,
   activeReadingSentence,
   onReadSelectedText,
   onAskAiAboutText,
@@ -93,16 +95,23 @@ export const ArticleReaderView: React.FC<ArticleReaderViewProps> = ({
     containerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }, [article.id, currentPage]);
 
-  // Emit current page text for TTS, AI Q&A, and Live Voice
+  // Emit current page text for TTS (filtered), AI Q&A, and Live Voice
   useEffect(() => {
-    const text = currentSlice?.plainText || article.plainText || "";
-    const ttsText =
-      currentPage === 1 && article.title
-        ? `${article.title}.\n\n${text}`
-        : text;
-    onPageTextExtracted(text);
-    onPageTtsTextExtracted(ttsText, []);
-  }, [article.id, article.title, currentPage, currentSlice?.plainText]);
+    const { plainText, ttsText, filteredHeaders } = buildArticlePageTtsText(
+      article,
+      currentSlice,
+      ttsFilterSettings
+    );
+    onPageTextExtracted(plainText);
+    onPageTtsTextExtracted(ttsText, filteredHeaders);
+  }, [
+    article,
+    currentPage,
+    currentSlice,
+    ttsFilterSettings?.skipHeadersFooters,
+    ttsFilterSettings?.skipChapterHeadings,
+    ttsFilterSettings?.customIgnoredLines,
+  ]);
 
   const handleTouchStart = (e: React.TouchEvent) => {
     if (!appearance.slideGesturesEnabled) return;
