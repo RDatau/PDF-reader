@@ -902,7 +902,7 @@ export default function App() {
         onEnd: () => {
           setIsSpeaking(false);
           setActiveReadingSentence(undefined);
-          if (autoAdvance && currentPage < totalPages) {
+          if (!isSelection && autoAdvance && currentPage < totalPages) {
             setCurrentPage((p) => p + 1);
           }
         },
@@ -1086,7 +1086,7 @@ export default function App() {
         setIsSpeaking(false);
         setIsPaused(false);
         setActiveReadingSentence(undefined);
-        if (autoAdvance && currentPage < totalPages) {
+        if (!isSelection && autoAdvance && currentPage < totalPages) {
           setCurrentPage((p) => p + 1);
         }
       }
