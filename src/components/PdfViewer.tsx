@@ -80,6 +80,8 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const selectionTooltipRef = useRef<HTMLDivElement | null>(null);
+  const isPointerDownRef = useRef<boolean>(false);
   const activeRenderTaskRef = useRef<any>(null);
   const lastRawPageTextRef = useRef<{
     textContent: any;
@@ -100,7 +102,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
 
   // Selection floating tooltip state
   const [selectedText, setSelectedText] = useState("");
-  const [selectionBox, setSelectionBox] = useState<{ x: number; y: number } | null>(null);
+  const [selectionBox, setSelectionBox] = useState<{ x: number; y: number; placeBelow?: boolean } | null>(null);
   const [copied, setCopied] = useState(false);
 
   // Read Aloud top banner dismissal state
@@ -410,8 +412,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     }, 280);
   };
 
-  // Text selection handler
-  const handleMouseUp = () => {
+  const syncSelectionTooltip = () => {
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed) {
       setSelectedText("");
@@ -419,14 +420,33 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
       return;
     }
 
+    const container = containerRef.current;
+    if (
+      container &&
+      selection.anchorNode &&
+      !container.contains(selection.anchorNode) &&
+      selection.focusNode &&
+      !container.contains(selection.focusNode)
+    ) {
+      return;
+    }
+
     const text = selection.toString().trim();
-    if (text.length > 0) {
+    if (text.length > 0 && selection.rangeCount > 0) {
       const range = selection.getRangeAt(0);
       const rect = range.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return;
+
+      const viewportW = typeof window !== "undefined" ? window.innerWidth : 800;
+      const clampedX = Math.max(115, Math.min(viewportW - 115, rect.left + rect.width / 2));
+      const showBelow = rect.top < 115;
+      const posY = showBelow ? rect.bottom + 10 : rect.top - 10;
+
       setSelectedText(text);
       setSelectionBox({
-        x: rect.left + rect.width / 2,
-        y: Math.max(60, rect.top - 10),
+        x: clampedX,
+        y: posY,
+        placeBelow: showBelow,
       });
     } else {
       setSelectedText("");
@@ -434,9 +454,59 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     }
   };
 
-  const handleCopySelection = () => {
-    if (selectedText) {
-      navigator.clipboard.writeText(selectedText);
+  // Keep selection tooltip synced for touch handle adjustments as well as mouse release
+  useEffect(() => {
+    let timer: number | null = null;
+    const onSelectionChange = () => {
+      if (isPointerDownRef.current) return;
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        syncSelectionTooltip();
+      }, 140);
+    };
+
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener("selectionchange", onSelectionChange);
+    };
+  }, []);
+
+  // Text selection handler
+  const handleMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
+    isPointerDownRef.current = false;
+    if (selectionTooltipRef.current && selectionTooltipRef.current.contains(e.target as Node)) {
+      return;
+    }
+    syncSelectionTooltip();
+  };
+
+  const handleCopySelection = async () => {
+    if (!selectedText) return;
+    let didCopy = false;
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(selectedText);
+        didCopy = true;
+      }
+    } catch {
+      didCopy = false;
+    }
+    if (!didCopy) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = selectedText;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        didCopy = document.execCommand("copy");
+        document.body.removeChild(ta);
+      } catch {
+        didCopy = false;
+      }
+    }
+    if (didCopy) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
@@ -556,6 +626,12 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
+      onMouseDown={(e) => {
+        if (selectionTooltipRef.current && selectionTooltipRef.current.contains(e.target as Node)) {
+          return;
+        }
+        isPointerDownRef.current = true;
+      }}
       onMouseUp={handleMouseUp}
       className="relative flex-1 overflow-auto flex flex-col items-center justify-start p-2 sm:p-6 transition-colors duration-200 select-text touch-pan-y"
       style={{
@@ -595,15 +671,28 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
       {/* Floating Selection Action Tooltip */}
       {selectionBox && selectedText && (
         <div
+          ref={selectionTooltipRef}
           id="selection-action-tooltip"
-          className="fixed z-50 transform -translate-x-1/2 -translate-y-full mb-2 bg-[#14171D] text-gray-200 rounded-md shadow-2xl border border-[#2D333B] px-2 py-1.5 flex items-center gap-1.5 animate-in fade-in zoom-in-95 duration-150"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          onMouseUp={(e) => e.stopPropagation()}
+          onTouchStart={(e) => e.stopPropagation()}
+          onTouchEnd={(e) => e.stopPropagation()}
+          className={`fixed z-50 transform -translate-x-1/2 ${
+            selectionBox.placeBelow ? "translate-y-0" : "-translate-y-full"
+          } bg-[#14171D] text-gray-200 rounded-md shadow-2xl border border-[#2D333B] px-2 py-1.5 flex items-center gap-1.5 animate-in fade-in zoom-in-95 duration-150`}
           style={{ left: selectionBox.x, top: selectionBox.y }}
         >
           <button
+            type="button"
             onClick={() => {
-              onReadSelectedText(selectedText);
+              const snippet = selectedText;
               setSelectedText("");
               setSelectionBox(null);
+              window.getSelection()?.removeAllRanges();
+              onReadSelectedText(snippet);
             }}
             className="flex items-center gap-1 text-xs px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white font-semibold transition-colors cursor-pointer"
             title="Read this highlighted text aloud"
@@ -613,10 +702,13 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
           </button>
 
           <button
+            type="button"
             onClick={() => {
-              onAskAiAboutText(selectedText);
+              const snippet = selectedText;
               setSelectedText("");
               setSelectionBox(null);
+              window.getSelection()?.removeAllRanges();
+              onAskAiAboutText(snippet);
             }}
             className="flex items-center gap-1 text-xs px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-semibold transition-colors cursor-pointer"
             title="Explain or summarize this selection with Gemini"
@@ -626,7 +718,10 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
           </button>
 
           <button
-            onClick={handleCopySelection}
+            type="button"
+            onClick={() => {
+              void handleCopySelection();
+            }}
             className="p-1 rounded hover:bg-[#1F2937] text-gray-400 hover:text-white transition-colors cursor-pointer"
             title="Copy text to clipboard"
           >
