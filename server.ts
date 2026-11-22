@@ -830,6 +830,97 @@ app.post("/api/tts/merge", async (req, res) => {
   }
 });
 
+// Merge multiple generated Selected-Text WAV TTS clips using the dedicated Python script
+app.post("/api/tts/merge-selection", async (req, res) => {
+  let tempDir: string | null = null;
+  try {
+    const rawParts = Array.isArray(req.body?.parts) ? req.body.parts : [];
+    const silenceMs = Math.max(0, Math.min(2000, Number(req.body?.silenceMs ?? 220) || 0));
+    const rawTitle = typeof req.body?.title === "string" ? req.body.title.trim().slice(0, 160) : "";
+
+    if (rawParts.length === 0) {
+      res.status(400).json({ error: "Daftar bagian audio teks pilihan tidak boleh kosong." });
+      return;
+    }
+
+    const candidateScripts = [
+      path.join(process.cwd(), "scripts", "merge_selection_tts.py"),
+      path.resolve(process.cwd(), "..", "scripts", "merge_selection_tts.py"),
+    ];
+    const scriptPath = candidateScripts.find((p) => fs.existsSync(p));
+    if (!scriptPath) {
+      res.status(500).json({ error: "Skrip Python scripts/merge_selection_tts.py tidak ditemukan." });
+      return;
+    }
+
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "voxreader-tts-sel-merge-"));
+    const inputPaths: string[] = [];
+
+    for (let i = 0; i < rawParts.length; i++) {
+      const b64 = typeof rawParts[i] === "string" ? rawParts[i].trim() : "";
+      if (!b64) continue;
+      const buf = Buffer.from(b64, "base64");
+      if (buf.length <= 44) continue;
+      const partPath = path.join(tempDir, `pilihan_${String(i + 1).padStart(3, "0")}.wav`);
+      fs.writeFileSync(partPath, buf);
+      inputPaths.push(partPath);
+    }
+
+    if (inputPaths.length === 0) {
+      res.status(400).json({ error: "Tidak ada data WAV teks pilihan yang valid untuk digabungkan." });
+      return;
+    }
+
+    const outputPath = path.join(tempDir, "merged_pilihan.wav");
+    const args = [
+      "--output",
+      outputPath,
+      "--silence-ms",
+      String(silenceMs),
+      ...(rawTitle ? ["--title", rawTitle] : []),
+      ...inputPaths,
+    ];
+    const { stdout } = await runPythonMergeScript(scriptPath, args);
+
+    if (!fs.existsSync(outputPath)) {
+      res.status(500).json({ error: "File hasil gabungan Python teks pilihan tidak ditemukan." });
+      return;
+    }
+
+    const mergedBuf = fs.readFileSync(outputPath);
+    let meta: any = {};
+    try {
+      meta = JSON.parse(stdout.trim() || "{}");
+    } catch {
+      meta = {};
+    }
+
+    res.json({
+      ok: true,
+      mode: "selection",
+      audio: mergedBuf.toString("base64"),
+      mimeType: "audio/wav",
+      durationSeconds: Number(meta.durationSeconds || 0),
+      sizeBytes: mergedBuf.length,
+      partsMerged: Number(meta.partsMerged || inputPaths.length),
+      mergedBy: "python",
+    });
+  } catch (error: any) {
+    console.error("Error merging selection TTS audio with Python:", error);
+    res.status(500).json({
+      error: error?.message || "Gagal menggabungkan audio TTS teks pilihan dengan skrip Python.",
+    });
+  } finally {
+    if (tempDir) {
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup errors
+      }
+    }
+  }
+});
+
 // --- Web Reader Mode: SSRF-Safe Article Fetcher & Ad-Free Extractor ---
 app.post("/api/article/fetch", async (req, res) => {
   try {

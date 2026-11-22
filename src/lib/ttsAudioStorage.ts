@@ -53,6 +53,48 @@ export function formatMergedPageTtsTitle(docName: string, pageNumber: number): s
   return `${baseTitle} - Hal ${pageNumber}`;
 }
 
+export function formatMergedSelectionTtsTitle(docName: string, pageNumber: number): string {
+  const baseTitle = cleanPdfDisplayTitle(docName);
+  return `${baseTitle} - Hal ${pageNumber} - Pilihan`;
+}
+
+export function isMergedSelectionClip(clip: {
+  id: string;
+  isSelectionMerged?: boolean;
+}): boolean {
+  return Boolean(clip.isSelectionMerged || clip.id.endsWith("::sel_full"));
+}
+
+export function isMergedPageClip(clip: {
+  id: string;
+  isMergedPage?: boolean;
+  isSelection?: boolean;
+  isSelectionMerged?: boolean;
+}): boolean {
+  if (isMergedSelectionClip(clip)) return false;
+  if (clip.id.endsWith("::full")) return true;
+  return Boolean(clip.isMergedPage && !clip.isSelection && !clip.id.includes("::sel_"));
+}
+
+export function isMergedAnyClip(clip: {
+  id: string;
+  isMergedPage?: boolean;
+  isSelection?: boolean;
+  isSelectionMerged?: boolean;
+}): boolean {
+  return isMergedPageClip(clip) || isMergedSelectionClip(clip);
+}
+
+export function isSelectionPartClip(clip: {
+  id: string;
+  isMergedPage?: boolean;
+  isSelection?: boolean;
+  isSelectionMerged?: boolean;
+}): boolean {
+  if (isMergedAnyClip(clip)) return false;
+  return Boolean(clip.isSelection || clip.id.includes("::sel_"));
+}
+
 export function buildTtsDownloadFilename(title: string, extension = "wav"): string {
   const sanitized = (title || "VOXReader_TTS")
     .replace(/[\\/:*?"<>|]+/g, "-")
@@ -107,6 +149,55 @@ export async function mergePageWavClips(
   };
 }
 
+export async function mergeSelectionWavClips(
+  wavBuffers: ArrayBuffer[],
+  silenceMs = 220,
+  title?: string
+): Promise<{
+  wavBuffer: ArrayBuffer;
+  durationSeconds: number;
+  mergedBy: "python" | "local";
+}> {
+  const validBuffers = wavBuffers.filter((b) => b && b.byteLength > 44);
+  if (validBuffers.length === 0) {
+    throw new Error("Tidak ada audio WAV teks pilihan yang dapat digabungkan.");
+  }
+
+  try {
+    const apiBase = getApiBaseUrl();
+    const parts = validBuffers.map((buf) => arrayBufferToBase64(buf));
+    const res = await fetch(`${apiBase}/api/tts/merge-selection`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ parts, silenceMs, title }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.ok && typeof data?.audio === "string" && data.audio.length > 0) {
+        const wavBuffer = base64ToArrayBuffer(data.audio);
+        return {
+          wavBuffer,
+          durationSeconds: Number(data.durationSeconds || 0),
+          mergedBy: "python",
+        };
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "Python /api/tts/merge-selection tidak tersedia, memakai penggabung WAV lokal:",
+      err
+    );
+  }
+
+  const localMerged = mergeWavArrayBuffersLocal(validBuffers, silenceMs);
+  return {
+    wavBuffer: localMerged.wavBuffer,
+    durationSeconds: localMerged.durationSeconds,
+    mergedBy: "local",
+  };
+}
+
 export async function saveTtsClip(clip: StoredTtsAudio): Promise<void> {
   const db = await openTtsDatabase();
   return new Promise((resolve, reject) => {
@@ -124,6 +215,64 @@ export async function saveTtsClip(clip: StoredTtsAudio): Promise<void> {
     } catch (err) {
       reject(err);
     }
+  });
+}
+
+export async function getSelectionPartsForPage(
+  docId: string,
+  pageNumber: number
+): Promise<StoredTtsAudio[]> {
+  const db = await openTtsDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const store = tx.objectStore(STORE_NAME);
+    const index = store.index("docId");
+    const req = index.getAll(docId);
+
+    req.onsuccess = () => {
+      const items: StoredTtsAudio[] = req.result || [];
+      const filtered = items
+        .filter(
+          (item) =>
+            item.pageNumber === pageNumber &&
+            isSelectionPartClip(item) &&
+            item.audioData &&
+            item.audioData.byteLength > 44
+        )
+        .sort((a, b) => {
+          if (a.partNumber !== b.partNumber) return a.partNumber - b.partNumber;
+          return a.createdAt - b.createdAt;
+        });
+      resolve(filtered);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function getNextSelectionPartNumber(
+  docId: string,
+  pageNumber: number
+): Promise<number> {
+  const db = await openTtsDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const store = tx.objectStore(STORE_NAME);
+    const index = store.index("docId");
+    const req = index.getAll(docId);
+
+    req.onsuccess = () => {
+      const items: StoredTtsAudio[] = req.result || [];
+      let maxPart = 0;
+      for (const item of items) {
+        if (item.pageNumber === pageNumber && isSelectionPartClip(item)) {
+          if (item.partNumber > maxPart) {
+            maxPart = item.partNumber;
+          }
+        }
+      }
+      resolve(maxPart + 1);
+    };
+    req.onerror = () => reject(req.error);
   });
 }
 
@@ -145,8 +294,8 @@ export async function cleanupStalePageParts(
         if (
           item.pageNumber === pageNumber &&
           !item.id.includes("::sel_") &&
-          !item.isMergedPage &&
-          !item.id.endsWith("::full") &&
+          !item.isSelection &&
+          !isMergedAnyClip(item) &&
           item.partNumber > maxPartNumber
         ) {
           store.delete(item.id);
@@ -156,6 +305,18 @@ export async function cleanupStalePageParts(
     };
     req.onerror = () => reject(req.error);
   });
+}
+
+function getClipGroupSortRank(clip: {
+  id: string;
+  isMergedPage?: boolean;
+  isSelection?: boolean;
+  isSelectionMerged?: boolean;
+}): number {
+  if (isMergedPageClip(clip)) return 0;
+  if (!isSelectionPartClip(clip) && !isMergedSelectionClip(clip)) return 1;
+  if (isMergedSelectionClip(clip)) return 2;
+  return 3;
 }
 
 export async function getAllTtsClipsMeta(): Promise<StoredTtsAudioMeta[]> {
@@ -183,15 +344,17 @@ export async function getAllTtsClipsMeta(): Promise<StoredTtsAudioMeta[]> {
         mimeType: c.mimeType,
         createdAt: c.createdAt,
         isMergedPage: c.isMergedPage,
+        isSelection: c.isSelection,
+        isSelectionMerged: c.isSelectionMerged,
         mergedBy: c.mergedBy,
       }));
-      // Sort by newest batch / page / merged-first then part order
+      // Sort by newest batch / page / group rank (page merged -> page parts -> selection merged -> selection parts)
       meta.sort((a, b) => {
         if (a.docId === b.docId && a.pageNumber === b.pageNumber) {
-          if (Boolean(a.isMergedPage) !== Boolean(b.isMergedPage)) {
-            return a.isMergedPage ? -1 : 1;
-          }
-          return a.partNumber - b.partNumber;
+          const rankDiff = getClipGroupSortRank(a) - getClipGroupSortRank(b);
+          if (rankDiff !== 0) return rankDiff;
+          if (a.partNumber !== b.partNumber) return a.partNumber - b.partNumber;
+          return a.createdAt - b.createdAt;
         }
         if (b.createdAt !== a.createdAt) return b.createdAt - a.createdAt;
         if (a.pageNumber !== b.pageNumber) return a.pageNumber - b.pageNumber;

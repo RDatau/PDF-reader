@@ -72,6 +72,8 @@ export interface StoredTtsAudio {
   audioData: ArrayBuffer;
   createdAt: number;
   isMergedPage?: boolean;
+  isSelection?: boolean;
+  isSelectionMerged?: boolean;
   mergedBy?: "python" | "local";
 }
 
